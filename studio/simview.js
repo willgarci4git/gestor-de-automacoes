@@ -165,7 +165,7 @@ function inspector() {
       const s = sim.session;
       const c = sim.contact;
       const flow = s ? state.flows[s.flowId] : null;
-      body.append(
+      body.append(...[
         s ? h('div', { class: 'kv' },
           h('div', {}, h('span', {}, 'Fluxo'), h('b', {}, `${s.flowId}@${s.flowVersion}`)),
           h('div', {}, h('span', {}, 'Nó atual'), h('b', {}, s.currentNodeId)),
@@ -175,15 +175,15 @@ function inspector() {
         ) : h('p', { class: 'muted' }, 'Sem sessão ainda.'),
         flow && s.status !== 'ended' && h('div', { class: 'mini-graph' }, renderGraph(flow, { active: s.currentNodeId })),
         s && h('details', { open: true }, h('summary', {}, 'Variáveis'), h('pre', {}, json({ contact: c?.fields, session: s.vars.session, flow: s.vars.flow }))),
-      );
+      ].filter((x) => x != null && x !== false));
     } else if (inspectorTab === 'integracao') {
       const list = [...sim.http].reverse();
       body.append(
         h('p', { class: 'muted' }, 'Tráfego real que o framework geraria: webhooks no formato oficial do provedor e chamadas às APIs (tokens mascarados).'),
-        list.length ? list.map(httpEntry) : h('p', { class: 'muted' }, 'Nada ainda.'),
+        ...(list.length ? list.map(httpEntry) : [h('p', { class: 'muted' }, 'Nada ainda.')]),
       );
     } else if (inspectorTab === 'motor') {
-      body.append([...sim.logs].reverse().map((l) => h('div', { class: `log lv-${l.level}` }, h('code', {}, l.level), h('b', {}, l.msg), h('span', { class: 'muted' }, ' ' + JSON.stringify(l.data)))));
+      body.append(...[...sim.logs].reverse().map((l) => h('div', { class: `log lv-${l.level}` }, h('code', {}, l.level), h('b', {}, l.msg), h('span', { class: 'muted' }, ' ' + JSON.stringify(l.data)))));
     } else if (inspectorTab === 'atendente') {
       const tickets = sim.tickets();
       if (!tickets.length) body.append(h('p', { class: 'muted' }, 'Nenhum transbordo. Digite "atendente" na conversa (em horário comercial) para abrir um ticket.'));
