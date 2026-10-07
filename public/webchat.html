@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Webchat — Bot Framework</title>
+<style>
+  :root { --bg:#f4f5f7; --panel:#fff; --ink:#1d2330; --muted:#6b7280; --bot:#eef1f6; --user:#1f6feb; --line:#e3e6eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --panel:#171a21; --ink:#e7e9ee; --muted:#9aa3b2; --bot:#222733; --user:#2f81f7; --line:#2a303c; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--ink); display:flex; justify-content:center; }
+  .chat { width:100%; max-width:480px; height:100dvh; display:flex; flex-direction:column; background:var(--panel); border-left:1px solid var(--line); border-right:1px solid var(--line); }
+  header { padding:14px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
+  header b { font-size:16px; } header small { color:var(--muted); }
+  header button { background:none; border:1px solid var(--line); color:var(--muted); border-radius:8px; padding:4px 10px; cursor:pointer; }
+  #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:8px; }
+  .msg { max-width:82%; padding:9px 12px; border-radius:14px; white-space:pre-wrap; word-wrap:break-word; }
+  .bot { background:var(--bot); align-self:flex-start; border-bottom-left-radius:4px; }
+  .user { background:var(--user); color:#fff; align-self:flex-end; border-bottom-right-radius:4px; }
+  .opts { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .opts button { border:1px solid var(--user); color:var(--user); background:transparent; border-radius:999px; padding:5px 12px; cursor:pointer; font:inherit; font-size:14px; }
+  .opts button:disabled { opacity:.45; cursor:default; }
+  form { display:flex; gap:8px; padding:12px; border-top:1px solid var(--line); }
+  input { flex:1; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:var(--bg); color:var(--ink); font:inherit; }
+  form button { padding:10px 16px; border:0; border-radius:10px; background:var(--user); color:#fff; font:inherit; cursor:pointer; }
+  img.media { max-width:100%; border-radius:8px; }
+</style>
+</head>
+<body>
+<div class="chat">
+  <header><div><b>Atendimento</b><br><small id="who"></small></div><button id="reset" title="Nova conversa">Nova conversa</button></header>
+  <div id="log" aria-live="polite"></div>
+  <form id="f"><input id="t" autocomplete="off" placeholder="Digite sua mensagem..." aria-label="Mensagem"><button>Enviar</button></form>
+</div>
+<script>
+  const tenant = new URLSearchParams(location.search).get('tenant') || 'default';
+  const store = { get(k){ try { return localStorage.getItem(k); } catch { return null; } }, set(k,v){ try { localStorage.setItem(k,v); } catch {} } };
+  let userId = store.get('wc_user') || ('u' + Math.random().toString(36).slice(2, 10));
+  store.set('wc_user', userId);
+  const log = document.getElementById('log');
+  document.getElementById('who').textContent = 'sessão ' + userId + ' · tenant ' + tenant;
+  const seen = new Set();
+
+  function render(entry) {
+    if (seen.has(entry.id)) return; seen.add(entry.id);
+    const m = entry.message, div = document.createElement('div');
+    div.className = 'msg ' + (entry.from === 'user' ? 'user' : 'bot');
+    if (m.kind === 'media') {
+      if (m.media.kind === 'image') { const img = document.createElement('img'); img.src = m.media.url; img.className = 'media'; div.appendChild(img); }
+      else { const a = document.createElement('a'); a.href = m.media.url; a.textContent = m.media.filename || m.media.url; a.target = '_blank'; div.appendChild(a); }
+      if (m.media.caption) div.append('\n' + m.media.caption);
+    } else div.textContent = m.text;
+    if (m.kind === 'choice') {
+      const box = document.createElement('div'); box.className = 'opts';
+      m.options.forEach(o => { const b = document.createElement('button'); b.type = 'button'; b.textContent = o.label;
+        b.onclick = () => { box.querySelectorAll('button').forEach(x => x.disabled = true); post({ optionId: o.id, text: o.label }); }; box.appendChild(b); });
+      div.appendChild(box);
+    }
+    log.appendChild(div); log.scrollTop = log.scrollHeight;
+  }
+
+  async function post(body) {
+    await fetch(`/webchat/${tenant}/messages`, { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ userId, ...body }) });
+  }
+
+  async function connect() {
+    const hist = await fetch(`/webchat/${tenant}/history?userId=${userId}`).then(r => r.json()).catch(() => []);
+    hist.forEach(render);
+    const es = new EventSource(`/webchat/${tenant}/stream?userId=${userId}`);
+    es.addEventListener('message', e => render(JSON.parse(e.data)));
+  }
+
+  document.getElementById('f').onsubmit = e => { e.preventDefault(); const t = document.getElementById('t'); const text = t.value.trim(); if (!text) return; t.value = ''; post({ text }); };
+  document.getElementById('reset').onclick = () => { store.set('wc_user', 'u' + Math.random().toString(36).slice(2, 10)); location.reload(); };
+  connect();
+</script>
+</body>
+</html>

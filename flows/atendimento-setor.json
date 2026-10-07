@@ -1,0 +1,608 @@
+{
+  "id": "atendimento-setor",
+  "version": 1,
+  "name": "Atendimento por setor (URA digital)",
+  "description": "Fluxo de atendimento por setor do curso Caixa Rápido (oficinas, contabilidade, empresas com vários departamentos): saudação por horário, identificação, menu de setores, coleta de dados (veículo e KM), recomendação condicional, link da agenda com confirmação por atraso inteligente de 10 min e transbordo por fila conforme o horário comercial do cliente.",
+  "start": "saudacao",
+  "optIn": true,
+  "triggers": [
+    {
+      "kind": "ref",
+      "values": [
+        "site",
+        "google",
+        "gmb"
+      ],
+      "tags": [
+        "origem_link"
+      ]
+    },
+    {
+      "kind": "keyword",
+      "values": [
+        "revisao",
+        "troca de oleo",
+        "oleo"
+      ],
+      "tags": [
+        "origem_palavra_revisao"
+      ]
+    },
+    {
+      "kind": "keyword",
+      "values": [
+        "oi",
+        "ola",
+        "bom dia",
+        "boa tarde",
+        "boa noite",
+        "menu",
+        "inicio"
+      ]
+    },
+    {
+      "kind": "default",
+      "tags": [
+        "origem_organico"
+      ]
+    }
+  ],
+  "globals": {
+    "intents": {
+      "atendente": {
+        "match": [
+          "atendente",
+          "falar com humano",
+          "mecanico"
+        ],
+        "goto": "checa_horario"
+      },
+      "menu": {
+        "match": [
+          "menu",
+          "voltar ao inicio",
+          "inicio"
+        ],
+        "goto": "menu_setor"
+      },
+      "sair": {
+        "match": [
+          "sair",
+          "encerrar",
+          "tchau"
+        ],
+        "goto": "encerrar"
+      }
+    }
+  },
+  "nodes": {
+    "saudacao": {
+      "type": "message",
+      "text": "{{system.greeting}}! 👋 Você está falando com a {{tenant.nome}}.",
+      "next": "tem_nome"
+    },
+    "tem_nome": {
+      "type": "condition",
+      "branches": [
+        {
+          "when": {
+            "var": "contact.full_name",
+            "op": "exists"
+          },
+          "next": "menu_setor"
+        }
+      ],
+      "default": "pergunta_nome"
+    },
+    "pergunta_nome": {
+      "type": "input",
+      "prompt": "Para começar, qual é o seu nome?",
+      "saveTo": "contact.full_name",
+      "validator": {
+        "kind": "minLength",
+        "value": 3
+      },
+      "errorMessage": "Pode me dizer seu nome, por favor? (mínimo 3 letras)",
+      "maxAttempts": 3,
+      "onInvalid": "menu_setor",
+      "timeoutSec": 1800,
+      "onTimeout": "encerrar_inatividade",
+      "next": "menu_setor"
+    },
+    "menu_setor": {
+      "type": "router",
+      "prompt": "{{contact.full_name}}, com qual setor você quer falar?",
+      "display": "list",
+      "saveTo": "session.setor",
+      "options": [
+        {
+          "id": "revisao",
+          "label": "{{tenant.labelAgendar}}",
+          "match": [
+            "revisao",
+            "agendar",
+            "oleo",
+            "manutencao"
+          ],
+          "next": "tag_revisao"
+        },
+        {
+          "id": "orcamento",
+          "label": "Orçamento",
+          "match": [
+            "orcamento",
+            "preco",
+            "peca"
+          ],
+          "next": "orcamento_desc"
+        },
+        {
+          "id": "financeiro",
+          "label": "Financeiro",
+          "match": [
+            "financeiro",
+            "boleto",
+            "pagamento"
+          ],
+          "next": "menu_financeiro"
+        },
+        {
+          "id": "posvenda",
+          "label": "Pós-venda e garantia",
+          "match": [
+            "garantia",
+            "pos venda",
+            "reclamacao"
+          ],
+          "next": "posvenda_desc"
+        },
+        {
+          "id": "atendente",
+          "label": "Falar com atendente",
+          "match": [
+            "atendente",
+            "humano"
+          ],
+          "next": "checa_horario"
+        }
+      ],
+      "noMatchMessage": "Não encontrei esse setor 🤔",
+      "maxAttempts": 3,
+      "onExhausted": "checa_horario",
+      "timeoutSec": 1800,
+      "onTimeout": "encerrar_inatividade"
+    },
+    "tag_revisao": {
+      "type": "set",
+      "addTags": [
+        "setor_revisao"
+      ],
+      "next": "veiculo"
+    },
+    "veiculo": {
+      "type": "input",
+      "prompt": "Qual o modelo e o ano do veículo? (ex.: Onix 2021)",
+      "saveTo": "contact.veiculo",
+      "validator": {
+        "kind": "minLength",
+        "value": 3
+      },
+      "maxAttempts": 3,
+      "onInvalid": "checa_horario",
+      "timeoutSec": 1800,
+      "onTimeout": "encerrar_inatividade",
+      "next": "km"
+    },
+    "km": {
+      "type": "input",
+      "prompt": "Qual a quilometragem atual? 🔢 Envie só os números.",
+      "saveTo": "contact.km",
+      "validator": {
+        "kind": "number",
+        "min": 0,
+        "max": 2000000
+      },
+      "errorMessage": "Me envie só os números da quilometragem, por favor (ex.: 45000).",
+      "maxAttempts": 3,
+      "onInvalid": "checa_horario",
+      "timeoutSec": 1800,
+      "onTimeout": "encerrar_inatividade",
+      "next": "pacote"
+    },
+    "pacote": {
+      "type": "condition",
+      "branches": [
+        {
+          "when": {
+            "var": "contact.km",
+            "op": "gte",
+            "value": 40000
+          },
+          "next": "rev_completa"
+        }
+      ],
+      "default": "rev_basica"
+    },
+    "rev_completa": {
+      "type": "set",
+      "assign": {
+        "session.pacote": "Revisão completa (freios, suspensão e fluidos)"
+      },
+      "next": "recomendacao"
+    },
+    "rev_basica": {
+      "type": "set",
+      "assign": {
+        "session.pacote": "Revisão básica (óleo e filtros)"
+      },
+      "next": "recomendacao"
+    },
+    "recomendacao": {
+      "type": "message",
+      "text": "Para {{contact.veiculo}} com {{contact.km}} km recomendamos: *{{session.pacote}}*.\n{{tenant.textoPlanos}}",
+      "next": "link_agenda"
+    },
+    "link_agenda": {
+      "type": "message",
+      "text": "Escolha o melhor dia e horário na nossa agenda online 👇\n{{tenant.linkAgenda}}",
+      "next": "confirma"
+    },
+    "confirma": {
+      "type": "router",
+      "prompt": "Assim que agendar, me confirme por aqui 😉 Conseguiu agendar?",
+      "display": "buttons",
+      "options": [
+        {
+          "id": "sim",
+          "label": "Sim, agendei ✅",
+          "match": [
+            "sim",
+            "agendei",
+            "consegui"
+          ],
+          "next": "agendado"
+        },
+        {
+          "id": "ajuda",
+          "label": "Preciso de ajuda",
+          "match": [
+            "nao",
+            "ajuda"
+          ],
+          "next": "checa_horario"
+        }
+      ],
+      "maxAttempts": 2,
+      "onExhausted": "checa_horario",
+      "timeoutSec": 600,
+      "onTimeout": "lembrete"
+    },
+    "lembrete": {
+      "type": "message",
+      "text": "Oi {{contact.full_name}}! Passando para saber se conseguiu escolher um horário 🗓️",
+      "next": "confirma_2"
+    },
+    "confirma_2": {
+      "type": "router",
+      "prompt": "Conseguiu agendar?",
+      "display": "buttons",
+      "options": [
+        {
+          "id": "sim",
+          "label": "Sim, agendei ✅",
+          "match": [
+            "sim",
+            "agendei"
+          ],
+          "next": "agendado"
+        },
+        {
+          "id": "ajuda",
+          "label": "Preciso de ajuda",
+          "match": [
+            "nao",
+            "ajuda"
+          ],
+          "next": "checa_horario"
+        }
+      ],
+      "maxAttempts": 2,
+      "onExhausted": "encerrar",
+      "timeoutSec": 3600,
+      "onTimeout": "encerrar_inatividade"
+    },
+    "agendado": {
+      "type": "set",
+      "addTags": [
+        "agendado"
+      ],
+      "next": "fim_agendado"
+    },
+    "fim_agendado": {
+      "type": "end",
+      "message": "Perfeito! Te esperamos na {{tenant.nome}}. 🔧"
+    },
+    "orcamento_desc": {
+      "type": "input",
+      "prompt": "Descreva o que você precisa (peça ou serviço e o modelo do carro):",
+      "saveTo": "session.pedido",
+      "validator": {
+        "kind": "minLength",
+        "value": 5
+      },
+      "maxAttempts": 3,
+      "onInvalid": "checa_horario",
+      "timeoutSec": 1800,
+      "onTimeout": "encerrar_inatividade",
+      "next": "orcamento_registra"
+    },
+    "orcamento_registra": {
+      "type": "integration",
+      "request": {
+        "method": "POST",
+        "url": "{{secrets.leads_webhook_url}}",
+        "body": {
+          "tipo": "orcamento",
+          "nome": "{{contact.full_name}}",
+          "pedido": "{{session.pedido}}",
+          "canal": "{{system.channel}}",
+          "usuario": "{{system.userId}}",
+          "criado_em": "{{system.now}}"
+        }
+      },
+      "timeoutMs": 5000,
+      "retry": {
+        "max": 2,
+        "backoffMs": 500
+      },
+      "next": "orcamento_ok",
+      "onError": "orcamento_pendente"
+    },
+    "orcamento_pendente": {
+      "type": "set",
+      "addTags": [
+        "pendente_sincronizacao"
+      ],
+      "next": "orcamento_ok"
+    },
+    "orcamento_ok": {
+      "type": "set",
+      "addTags": [
+        "setor_orcamento"
+      ],
+      "next": "orcamento_horario"
+    },
+    "orcamento_horario": {
+      "type": "condition",
+      "branches": [
+        {
+          "when": {
+            "var": "system.inBusinessHours",
+            "op": "eq",
+            "value": true
+          },
+          "next": "transbordo_orcamento"
+        }
+      ],
+      "default": "fora_horario"
+    },
+    "transbordo_orcamento": {
+      "type": "handoff",
+      "queue": "orcamentos",
+      "message": "Recebido! 📋 Um consultor vai preparar seu orçamento e já te responde por aqui.",
+      "contextVars": [
+        "contact.full_name",
+        "session.pedido"
+      ],
+      "slaSec": 900,
+      "onSlaTimeout": "sla_estourado"
+    },
+    "menu_financeiro": {
+      "type": "router",
+      "prompt": "Financeiro — o que você precisa?",
+      "display": "buttons",
+      "options": [
+        {
+          "id": "boleto",
+          "label": "2ª via de boleto",
+          "match": [
+            "boleto",
+            "segunda via"
+          ],
+          "next": "boleto"
+        },
+        {
+          "id": "negociar",
+          "label": "Negociar pagamento",
+          "match": [
+            "negociar",
+            "parcelar"
+          ],
+          "next": "financeiro_horario"
+        },
+        {
+          "id": "voltar",
+          "label": "Voltar ao menu",
+          "match": [
+            "voltar",
+            "menu"
+          ],
+          "next": "menu_setor"
+        }
+      ],
+      "maxAttempts": 2,
+      "onExhausted": "checa_horario"
+    },
+    "boleto": {
+      "type": "message",
+      "text": "Você pode emitir a 2ª via aqui: {{tenant.linkBoleto}}",
+      "next": "mais_algo"
+    },
+    "financeiro_horario": {
+      "type": "condition",
+      "branches": [
+        {
+          "when": {
+            "var": "system.inBusinessHours",
+            "op": "eq",
+            "value": true
+          },
+          "next": "transbordo_financeiro"
+        }
+      ],
+      "default": "fora_horario"
+    },
+    "transbordo_financeiro": {
+      "type": "handoff",
+      "queue": "financeiro",
+      "message": "Vou te transferir para o financeiro. Em instantes alguém continua com você. 🙂",
+      "contextVars": [
+        "contact.full_name"
+      ],
+      "slaSec": 900,
+      "onSlaTimeout": "sla_estourado"
+    },
+    "posvenda_desc": {
+      "type": "input",
+      "prompt": "Conte o que aconteceu e, se tiver, o número da ordem de serviço:",
+      "saveTo": "session.relato",
+      "validator": {
+        "kind": "minLength",
+        "value": 5
+      },
+      "maxAttempts": 3,
+      "onInvalid": "checa_horario",
+      "timeoutSec": 1800,
+      "onTimeout": "encerrar_inatividade",
+      "next": "posvenda_tag"
+    },
+    "posvenda_tag": {
+      "type": "set",
+      "addTags": [
+        "setor_posvenda"
+      ],
+      "next": "posvenda_horario"
+    },
+    "posvenda_horario": {
+      "type": "condition",
+      "branches": [
+        {
+          "when": {
+            "var": "system.inBusinessHours",
+            "op": "eq",
+            "value": true
+          },
+          "next": "transbordo_posvenda"
+        }
+      ],
+      "default": "fora_horario"
+    },
+    "transbordo_posvenda": {
+      "type": "handoff",
+      "queue": "pos-venda",
+      "message": "Obrigado pelo relato. Nossa equipe de pós-venda vai assumir a conversa. 🛠️",
+      "contextVars": [
+        "contact.full_name",
+        "contact.veiculo",
+        "session.relato"
+      ],
+      "slaSec": 900,
+      "onSlaTimeout": "sla_estourado"
+    },
+    "mais_algo": {
+      "type": "router",
+      "prompt": "Posso ajudar em mais alguma coisa?",
+      "display": "buttons",
+      "options": [
+        {
+          "id": "menu",
+          "label": "Sim, ver o menu",
+          "match": [
+            "sim",
+            "menu"
+          ],
+          "next": "menu_setor"
+        },
+        {
+          "id": "atendente",
+          "label": "Falar com atendente",
+          "next": "checa_horario"
+        },
+        {
+          "id": "nao",
+          "label": "Não, obrigado",
+          "match": [
+            "nao",
+            "obrigado",
+            "so isso"
+          ],
+          "next": "encerrar"
+        }
+      ],
+      "maxAttempts": 2,
+      "onExhausted": "encerrar",
+      "timeoutSec": 900,
+      "onTimeout": "encerrar_inatividade"
+    },
+    "checa_horario": {
+      "type": "condition",
+      "branches": [
+        {
+          "when": {
+            "var": "system.inBusinessHours",
+            "op": "eq",
+            "value": true
+          },
+          "next": "transbordo"
+        }
+      ],
+      "default": "fora_horario"
+    },
+    "transbordo": {
+      "type": "handoff",
+      "queue": "recepcao",
+      "message": "Certo! Vou te transferir para nossa equipe. Em instantes alguém continua com você. 🙂",
+      "contextVars": [
+        "contact.full_name",
+        "contact.veiculo",
+        "contact.km",
+        "session.setor"
+      ],
+      "slaSec": 600,
+      "onSlaTimeout": "sla_estourado"
+    },
+    "sla_estourado": {
+      "type": "message",
+      "text": "Nossa equipe está com alta demanda no momento. Registramos seu contato e retornaremos o quanto antes.",
+      "next": "encerrar"
+    },
+    "fora_horario": {
+      "type": "message",
+      "text": "Nosso atendimento humano funciona {{tenant.horarioTexto}}. Deixe sua mensagem que retornamos no próximo horário útil.",
+      "next": "recado"
+    },
+    "recado": {
+      "type": "input",
+      "prompt": "Qual é a sua mensagem?",
+      "saveTo": "session.recado",
+      "timeoutSec": 900,
+      "onTimeout": "encerrar_inatividade",
+      "next": "tag_recado"
+    },
+    "tag_recado": {
+      "type": "set",
+      "addTags": [
+        "recado_fora_horario"
+      ],
+      "next": "encerrar"
+    },
+    "encerrar_inatividade": {
+      "type": "end",
+      "message": "Encerrei nosso atendimento por inatividade. Quando quiser, é só mandar um \"oi\"! 👋"
+    },
+    "encerrar": {
+      "type": "end",
+      "message": "Obrigado pelo contato! Quando precisar, é só mandar um \"oi\". 👋"
+    }
+  }
+}

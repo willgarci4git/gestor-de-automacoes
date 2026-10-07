@@ -1,0 +1,23 @@
+{
+  "name": "gestor-de-automacoes",
+  "version": "0.4.0",
+  "description": "Framework agnóstico de canal para bots de atendimento baseados em fluxos declarativos (State Engine).",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning src/server/main.ts",
+    "dev": "node --env-file-if-exists=.env --watch --disable-warning=ExperimentalWarning src/server/main.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test-reporter=spec --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "validate": "node --disable-warning=ExperimentalWarning src/cli/validate.ts flows",
+    "build:studio": "node --disable-warning=ExperimentalWarning scripts/build-studio.ts",
+    "import-bundle": "node --disable-warning=ExperimentalWarning scripts/import-bundle.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.0"
+  }
+}

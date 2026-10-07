@@ -1,0 +1,263 @@
+{
+  "id": "pre-atendimento",
+  "version": 1,
+  "name": "Pré-atendimento (serviços / clínicas)",
+  "description": "Fluxo de pré-atendimento do curso Caixa Rápido, parametrizado por tenant ({{tenant.*}}): boas-vindas com saudação por horário, identificação, iniciadores de conversa (matriz de decisão) e transbordo conforme horário comercial do cliente.",
+  "start": "boas_vindas",
+  "triggers": [
+    {
+      "kind": "keyword",
+      "values": [
+        "oi",
+        "ola",
+        "bom dia",
+        "boa tarde",
+        "boa noite",
+        "menu",
+        "inicio"
+      ]
+    },
+    {
+      "kind": "default"
+    }
+  ],
+  "globals": {
+    "intents": {
+      "atendente": {
+        "match": [
+          "atendente",
+          "falar com humano",
+          "suporte humano"
+        ],
+        "goto": "checa_horario"
+      },
+      "menu": {
+        "match": [
+          "menu",
+          "voltar ao inicio",
+          "inicio"
+        ],
+        "goto": "menu_principal"
+      },
+      "sair": {
+        "match": [
+          "sair",
+          "encerrar",
+          "tchau"
+        ],
+        "goto": "encerrar"
+      }
+    }
+  },
+  "nodes": {
+    "boas_vindas": {
+      "type": "message",
+      "text": "{{system.greeting}}! 👋 Seja bem-vindo(a) à {{tenant.nome}}. Sou o assistente virtual e vou agilizar seu atendimento.",
+      "next": "tem_nome"
+    },
+    "tem_nome": {
+      "type": "condition",
+      "branches": [
+        {
+          "when": {
+            "var": "contact.full_name",
+            "op": "exists"
+          },
+          "next": "saudacao_retorno"
+        }
+      ],
+      "default": "pergunta_nome"
+    },
+    "saudacao_retorno": {
+      "type": "message",
+      "text": "Que bom te ver de novo, {{contact.full_name}}!",
+      "next": "menu_principal"
+    },
+    "pergunta_nome": {
+      "type": "input",
+      "prompt": "Para começar, qual é o seu nome completo?",
+      "saveTo": "contact.full_name",
+      "validator": {
+        "kind": "minLength",
+        "value": 3
+      },
+      "errorMessage": "Pode me dizer seu nome completo, por favor? (mínimo 3 letras)",
+      "maxAttempts": 3,
+      "timeoutSec": 1800,
+      "next": "menu_principal",
+      "onInvalid": "menu_principal",
+      "onTimeout": "encerrar_inatividade"
+    },
+    "menu_principal": {
+      "type": "router",
+      "prompt": "Como posso te ajudar hoje, {{contact.full_name}}?",
+      "display": "list",
+      "saveTo": "session.motivo",
+      "options": [
+        {
+          "id": "agendar",
+          "label": "{{tenant.labelAgendar}}",
+          "match": [
+            "agendar",
+            "agendamento",
+            "consulta",
+            "marcar"
+          ],
+          "next": "tag_agendamento"
+        },
+        {
+          "id": "planos",
+          "label": "Planos e valores",
+          "match": [
+            "plano",
+            "valor",
+            "preco",
+            "convenio"
+          ],
+          "next": "info_planos"
+        },
+        {
+          "id": "endereco",
+          "label": "Endereço e horário",
+          "match": [
+            "endereco",
+            "onde fica",
+            "horario",
+            "localizacao"
+          ],
+          "next": "info_endereco"
+        },
+        {
+          "id": "atendente",
+          "label": "Falar com atendente",
+          "match": [
+            "atendente",
+            "humano"
+          ],
+          "next": "checa_horario"
+        }
+      ],
+      "noMatchMessage": "Não encontrei essa opção 🤔",
+      "maxAttempts": 3,
+      "onExhausted": "checa_horario",
+      "timeoutSec": 1800,
+      "onTimeout": "encerrar_inatividade"
+    },
+    "tag_agendamento": {
+      "type": "set",
+      "addTags": [
+        "interesse_agendamento"
+      ],
+      "next": "fluxo_agendamento"
+    },
+    "fluxo_agendamento": {
+      "type": "subflow",
+      "flowId": "agendamento",
+      "next": "mais_algo"
+    },
+    "info_planos": {
+      "type": "message",
+      "text": "{{tenant.textoPlanos}}",
+      "next": "mais_algo"
+    },
+    "info_endereco": {
+      "type": "message",
+      "text": "📍 {{tenant.endereco}}\n🕘 {{tenant.horarioTexto}}",
+      "next": "mais_algo"
+    },
+    "mais_algo": {
+      "type": "router",
+      "prompt": "Posso ajudar em mais alguma coisa?",
+      "display": "buttons",
+      "options": [
+        {
+          "id": "sim",
+          "label": "Sim, ver o menu",
+          "match": [
+            "sim",
+            "menu"
+          ],
+          "next": "menu_principal"
+        },
+        {
+          "id": "atendente",
+          "label": "Falar com atendente",
+          "next": "checa_horario"
+        },
+        {
+          "id": "nao",
+          "label": "Não, obrigado",
+          "match": [
+            "nao",
+            "obrigado",
+            "so isso"
+          ],
+          "next": "encerrar"
+        }
+      ],
+      "maxAttempts": 2,
+      "onExhausted": "encerrar",
+      "timeoutSec": 900,
+      "onTimeout": "encerrar_inatividade"
+    },
+    "checa_horario": {
+      "type": "condition",
+      "branches": [
+        {
+          "when": {
+            "var": "system.inBusinessHours",
+            "op": "eq",
+            "value": true
+          },
+          "next": "transbordo"
+        }
+      ],
+      "default": "fora_horario"
+    },
+    "transbordo": {
+      "type": "handoff",
+      "queue": "recepcao",
+      "message": "Certo! Vou te transferir para nossa equipe de recepção. Em instantes alguém continua com você. 🙂",
+      "contextVars": [
+        "contact.full_name",
+        "session.motivo",
+        "session.agendamento"
+      ],
+      "slaSec": 600,
+      "onSlaTimeout": "sla_estourado"
+    },
+    "sla_estourado": {
+      "type": "message",
+      "text": "Nossa equipe está com alta demanda no momento. Registramos seu contato e retornaremos o quanto antes.",
+      "next": "encerrar"
+    },
+    "fora_horario": {
+      "type": "message",
+      "text": "Nosso atendimento humano funciona {{tenant.horarioTexto}}. Deixe sua mensagem que retornamos no próximo horário útil.",
+      "next": "recado"
+    },
+    "recado": {
+      "type": "input",
+      "prompt": "Qual é a sua mensagem?",
+      "saveTo": "session.recado",
+      "next": "tag_recado",
+      "timeoutSec": 900,
+      "onTimeout": "encerrar_inatividade"
+    },
+    "tag_recado": {
+      "type": "set",
+      "addTags": [
+        "recado_fora_horario"
+      ],
+      "next": "encerrar"
+    },
+    "encerrar_inatividade": {
+      "type": "end",
+      "message": "Encerrei nosso atendimento por inatividade. Quando quiser, é só mandar um \"oi\"! 👋"
+    },
+    "encerrar": {
+      "type": "end",
+      "message": "Obrigado pelo contato! Quando precisar, é só mandar um \"oi\". 👋"
+    }
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "id": "agendamento",
+  "version": 1,
+  "name": "Subfluxo de agendamento",
+  "description": "Coleta especialidade, data, período e telefone; envia o lead para uma planilha/CRM via webhook (Apps Script, Make, n8n...).",
+  "start": "especialidade",
+  "globals": {
+    "intents": {
+      "cancelar": { "match": ["cancelar", "desistir"], "goto": "cancelado" }
+    }
+  },
+  "nodes": {
+    "especialidade": {
+      "type": "router",
+      "prompt": "Qual especialidade você procura?",
+      "display": "buttons",
+      "saveTo": "flow.especialidade",
+      "options": [
+        { "id": "clinico", "label": "Clínico geral", "match": ["clinico", "geral"], "next": "data" },
+        { "id": "dermato", "label": "Dermatologia", "match": ["dermato", "pele"], "next": "data" },
+        { "id": "pediatria", "label": "Pediatria", "match": ["pediatra", "crianca"], "next": "data" }
+      ],
+      "maxAttempts": 3,
+      "onExhausted": "cancelado"
+    },
+    "data": {
+      "type": "input",
+      "prompt": "Para qual data você gostaria? (formato DD/MM/AAAA)",
+      "saveTo": "flow.data",
+      "validator": { "kind": "date" },
+      "errorMessage": "Data inválida. Use o formato DD/MM/AAAA, por exemplo 15/10/2026.",
+      "maxAttempts": 3,
+      "onInvalid": "cancelado",
+      "next": "periodo"
+    },
+    "periodo": {
+      "type": "router",
+      "prompt": "Qual período prefere?",
+      "display": "buttons",
+      "saveTo": "flow.periodo",
+      "options": [
+        { "id": "manha", "label": "Manhã", "match": ["manha", "cedo"], "next": "telefone" },
+        { "id": "tarde", "label": "Tarde", "next": "telefone" }
+      ]
+    },
+    "telefone": {
+      "type": "input",
+      "prompt": "Qual o melhor telefone para confirmarmos? (com DDD)",
+      "saveTo": "contact.telefone",
+      "validator": { "kind": "phone" },
+      "errorMessage": "Não reconheci o número. Envie com DDD, ex.: 11 99999-9999.",
+      "maxAttempts": 3,
+      "onInvalid": "cancelado",
+      "next": "resumo"
+    },
+    "resumo": {
+      "type": "set",
+      "assign": {
+        "session.agendamento": {
+          "especialidade": "{{flow.especialidade}}",
+          "data": "{{flow.data}}",
+          "periodo": "{{flow.periodo}}"
+        }
+      },
+      "next": "salvar_lead"
+    },
+    "salvar_lead": {
+      "type": "integration",
+      "request": {
+        "method": "POST",
+        "url": "{{secrets.leads_webhook_url}}",
+        "body": {
+          "nome": "{{contact.full_name}}",
+          "telefone": "{{contact.telefone}}",
+          "especialidade": "{{flow.especialidade}}",
+          "data": "{{flow.data}}",
+          "periodo": "{{flow.periodo}}",
+          "canal": "{{system.channel}}",
+          "criado_em": "{{system.now}}"
+        }
+      },
+      "timeoutMs": 5000,
+      "retry": { "max": 2, "backoffMs": 500 },
+      "saveTo": "flow.crm",
+      "next": "confirmado",
+      "onError": "confirmado_manual"
+    },
+    "confirmado": {
+      "type": "set",
+      "addTags": ["lead_agendamento"],
+      "next": "msg_confirmado"
+    },
+    "msg_confirmado": {
+      "type": "end",
+      "message": "Pronto! ✅ Pré-agendamento registrado: {{flow.especialidade}} em {{flow.data}} ({{flow.periodo}}). Nossa equipe vai confirmar pelo telefone {{contact.telefone}}."
+    },
+    "confirmado_manual": {
+      "type": "set",
+      "addTags": ["lead_agendamento", "pendente_sincronizacao"],
+      "next": "msg_confirmado"
+    },
+    "cancelado": {
+      "type": "end",
+      "message": "Tudo bem, agendamento não concluído."
+    }
+  }
+}

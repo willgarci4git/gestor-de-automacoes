@@ -1,0 +1,108 @@
+{
+  "id": "isca-instagram",
+  "version": 1,
+  "name": "Isca por comentário (Instagram)",
+  "description": "Quem comenta QUERO no post/Reel recebe o material no direct e entra no funil. A primeira resposta a um comentário é uma private reply única: por isso o fluxo envia UMA mensagem e espera.",
+  "start": "oferta",
+  "triggers": [
+    {
+      "kind": "comment",
+      "values": [
+        "quero",
+        "eu quero",
+        "link"
+      ],
+      "channels": [
+        "instagram"
+      ]
+    }
+  ],
+  "nodes": {
+    "oferta": {
+      "type": "router",
+      "prompt": "Oi! Vi seu comentário 😊 Quer receber o material gratuito da {{tenant.nome}} por aqui?",
+      "display": "buttons",
+      "options": [
+        {
+          "id": "sim",
+          "label": "Sim, quero!",
+          "match": [
+            "sim",
+            "quero"
+          ],
+          "next": "tag_lead"
+        },
+        {
+          "id": "nao",
+          "label": "Agora não",
+          "match": [
+            "nao"
+          ],
+          "next": "fim"
+        }
+      ],
+      "maxAttempts": 2,
+      "onExhausted": "fim"
+    },
+    "tag_lead": {
+      "type": "set",
+      "addTags": [
+        "lead_instagram",
+        "origem_comentario"
+      ],
+      "next": "entrega"
+    },
+    "entrega": {
+      "type": "message",
+      "text": "Aqui está: {{tenant.linkMaterial}}",
+      "next": "convite"
+    },
+    "convite": {
+      "type": "router",
+      "prompt": "Quer já agendar um horário com a gente?",
+      "display": "buttons",
+      "options": [
+        {
+          "id": "agendar",
+          "label": "Quero agendar",
+          "next": "agendar"
+        },
+        {
+          "id": "depois",
+          "label": "Depois",
+          "next": "fim"
+        }
+      ],
+      "maxAttempts": 2,
+      "onExhausted": "fim"
+    },
+    "agendar": {
+      "type": "subflow",
+      "flowId": "agendamento",
+      "next": "fim"
+    },
+    "fim": {
+      "type": "end",
+      "message": "Combinado! Qualquer coisa é só chamar. 💙"
+    },
+    "humano": {
+      "type": "handoff",
+      "queue": "instagram",
+      "message": "Vou chamar alguém da equipe para falar com você por aqui. 🙂",
+      "contextVars": [
+        "contact.name"
+      ]
+    }
+  },
+  "globals": {
+    "intents": {
+      "atendente": {
+        "match": [
+          "atendente",
+          "falar com humano"
+        ],
+        "goto": "humano"
+      }
+    }
+  }
+}

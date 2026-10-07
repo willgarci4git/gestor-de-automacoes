@@ -1,0 +1,102 @@
+{
+  "id": "reengajamento",
+  "version": 1,
+  "name": "Reengajamento (transmissão)",
+  "description": "Disparado via POST /admin/broadcast para uma etiqueta. Teste A/B de duas mensagens (modelos aprovados do WhatsApp; texto nos demais canais). O modelo tem botões cujo payload é 'agendar' ou 'nao'.",
+  "start": "ab",
+  "nodes": {
+    "ab": {
+      "type": "randomizer",
+      "variants": [
+        {
+          "id": "a",
+          "weight": 50,
+          "next": "msg_a"
+        },
+        {
+          "id": "b",
+          "weight": 50,
+          "next": "msg_b"
+        }
+      ]
+    },
+    "msg_a": {
+      "type": "message",
+      "template": {
+        "name": "retorno_consulta_a",
+        "language": "pt_BR",
+        "components": [
+          {
+            "type": "body",
+            "parameters": [
+              {
+                "type": "text",
+                "text": "{{contact.first_name}}"
+              }
+            ]
+          }
+        ]
+      },
+      "text": "Oi {{contact.first_name}}! Já faz um tempo desde sua última visita à {{tenant.nome}}. Vamos agendar seu retorno?",
+      "next": "resposta"
+    },
+    "msg_b": {
+      "type": "message",
+      "template": {
+        "name": "retorno_consulta_b",
+        "language": "pt_BR"
+      },
+      "text": "{{tenant.nome}}: temos horários livres esta semana. Quer garantir o seu?",
+      "next": "resposta"
+    },
+    "resposta": {
+      "type": "router",
+      "silent": true,
+      "prompt": "Quer agendar?",
+      "display": "buttons",
+      "options": [
+        {
+          "id": "agendar",
+          "label": "Quero agendar",
+          "match": [
+            "sim",
+            "quero",
+            "agendar"
+          ],
+          "next": "conv"
+        },
+        {
+          "id": "nao",
+          "label": "Não, obrigado",
+          "match": [
+            "nao"
+          ],
+          "next": "fim"
+        }
+      ],
+      "timeoutSec": 172800,
+      "onTimeout": "fim_silencioso",
+      "maxAttempts": 2,
+      "onExhausted": "fim"
+    },
+    "conv": {
+      "type": "set",
+      "addTags": [
+        "reengajado"
+      ],
+      "next": "agendar"
+    },
+    "agendar": {
+      "type": "subflow",
+      "flowId": "agendamento",
+      "next": "fim"
+    },
+    "fim": {
+      "type": "end",
+      "message": "Tudo bem! Quando quiser, é só mandar um \"oi\"."
+    },
+    "fim_silencioso": {
+      "type": "end"
+    }
+  }
+}

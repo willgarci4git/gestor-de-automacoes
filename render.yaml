@@ -1,0 +1,15 @@
+# Blueprint opcional do Render (plano gratuito) — use apenas quando for integrar os canais.
+# Limitações do plano free: hiberna após ~15 min sem tráfego e o disco é efêmero (SQLite reinicia).
+services:
+  - type: web
+    name: gestor-de-automacoes
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: TENANT_ID
+        value: clinica
+      - key: DB_PATH
+        value: /app/data/bot.db
