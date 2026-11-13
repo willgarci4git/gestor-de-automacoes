@@ -216,7 +216,7 @@ export async function runHttp(spec: HttpRequestSpec, opts: HttpRunnerOptions): P
         const next = new URL(loc, url);
         // Cabeçalhos de credencial não seguem para outro host (evita vazar segredos em redirecionamento).
         if (next.host !== url.host) headers = Object.fromEntries(Object.entries(headers).filter(([k]) => !/^(authorization|cookie|x-api-key)$/i.test(k)));
-        if (res.status === 303 || ((res.status === 301 || res.status === 302) && method !== 'GET' && method !== 'HEAD')) {
+        if (res.status === 303 || ((res.status === 301 || res.status === 302) && method !== 'GET')) {
           method = 'GET';
           reqBody = undefined;
           headers = Object.fromEntries(Object.entries(headers).filter(([k]) => k.toLowerCase() !== 'content-type'));
