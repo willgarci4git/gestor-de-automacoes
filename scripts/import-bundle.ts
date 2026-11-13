@@ -4,7 +4,7 @@
  *   --prune  remove arquivos de fluxo/cliente que não estão no pacote
  */
 import { readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FlowRegistry, FlowValidationError } from '../src/core/registry.ts';
 import { TenantRegistry } from '../src/core/tenants.ts';
@@ -32,6 +32,21 @@ try {
   } else console.error(`✖ ${(e as Error).message}`);
   console.error('Nada foi gravado.');
   process.exit(1);
+}
+
+// Defesa em profundidade contra path traversal (T5): além da validação de id no registro,
+// todo caminho gravado precisa ficar dentro de flows/ ou tenants/.
+const ID_RE = /^[\w-]{1,64}$/;
+for (const [dir, items] of [['flows', bundle.flows], ['tenants', bundle.tenants]] as const) {
+  for (const i of items as { id?: unknown }[]) {
+    const id = String(i?.id ?? '');
+    const base = resolve(root, dir);
+    const target = resolve(base, `${id}.json`);
+    if (!ID_RE.test(id) || !target.startsWith(base + sep)) {
+      console.error(`✖ id inválido em ${dir}: ${JSON.stringify(i?.id)} (use letras, números, _ e -). Nada foi gravado.`);
+      process.exit(1);
+    }
+  }
 }
 
 const write = (dir: string, items: { id: string }[]) => {

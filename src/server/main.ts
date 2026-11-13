@@ -14,6 +14,7 @@ import { TelegramChannel } from '../channels/telegram.ts';
 import { InstagramChannel } from '../channels/instagram.ts';
 import type { ChannelAdapter } from '../channels/types.ts';
 import { createHttpServer } from './http.ts';
+import { checkStartupSecurity } from './security.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const env = process.env;
@@ -61,11 +62,22 @@ const app = createBotApp({
 });
 app.start();
 
-if (!env.ADMIN_TOKEN) logger.warn('ADMIN_TOKEN não definido: rotas /admin, /handoff e /metrics estão ABERTAS (apenas desenvolvimento)');
+// --- Secure by default (T1/T15): sem token forte, as rotas administrativas não sobem abertas. ---
+const security = checkStartupSecurity(env);
+for (const w of security.warnings) logger.warn('security_warning', { detail: w });
+if (security.fatal) {
+  logger.error('startup_refused', { reason: security.fatal });
+  process.exit(1);
+}
 const server = createHttpServer(app, { tenantId: env.TENANT_ID ?? 'default', adminToken: env.ADMIN_TOKEN, publicDir: resolve(root, 'public') });
+// Limites contra conexões lentas e esgotamento de sockets (T7). Valores ajustáveis por ambiente.
+server.requestTimeout = Number(env.HTTP_REQUEST_TIMEOUT_MS ?? 30_000);
+server.headersTimeout = Number(env.HTTP_HEADERS_TIMEOUT_MS ?? 15_000);
+server.keepAliveTimeout = 5_000;
+server.maxConnections = Number(env.HTTP_MAX_CONNECTIONS ?? 500);
 const port = Number(env.PORT ?? 3000);
-server.listen(port, () => {
-  logger.info('server_started', { port, channels: Object.keys(app.adapters), flows: app.registry.list().map((f) => `${f.id}@${f.latest}`), storage: dbPath });
+server.listen(port, security.host, () => {
+  logger.info('server_started', { port, host: security.host, channels: Object.keys(app.adapters), flows: app.registry.list().map((f) => `${f.id}@${f.latest}`), storage: dbPath });
 });
 
 const shutdown = () => {

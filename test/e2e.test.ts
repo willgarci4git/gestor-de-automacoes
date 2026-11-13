@@ -13,6 +13,9 @@ import { WhatsAppChannel } from '../src/channels/whatsapp.ts';
 import { createHttpServer } from '../src/server/http.ts';
 import { BUSINESS_HOURS } from './helpers.ts';
 
+// Os destinos falsos deste teste rodam em 127.0.0.1: libera rede interna só aqui (proteção SSRF, T3).
+process.env.INTEGRATION_ALLOW_PRIVATE_NETWORK = '1';
+
 const ADMIN = 'admin-secreto';
 let app: BotApp;
 let server: Server;

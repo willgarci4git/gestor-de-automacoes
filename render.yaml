@@ -13,3 +13,5 @@ services:
         value: clinica
       - key: DB_PATH
         value: /app/data/bot.db
+      - key: INTEGRATION_ALLOWED_HOSTS
+        value: script.google.com,script.googleusercontent.com

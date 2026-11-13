@@ -19,6 +19,8 @@ const NODE_TYPES = ['message', 'input', 'router', 'condition', 'set', 'integrati
 const WAITING_TYPES = new Set(['input', 'router', 'wait', 'integration', 'handoff']);
 const VALIDATOR_KINDS = ['any', 'minLength', 'email', 'phone', 'number', 'date', 'cpf', 'regex'];
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+/** Id de fluxo: vira nome de arquivo (flows/<id>.json) — só letras, números, "_" e "-" (T5). */
+export const FLOW_ID_RE = /^[\w-]{1,64}$/;
 
 const isStr = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
@@ -163,6 +165,8 @@ export function validateFlow(flow: FlowDefinition, flowExists?: (flowId: string)
 
   if (!flow || typeof flow !== 'object') return { ok: false, errors: ['definição de fluxo ausente'], warnings };
   if (!isStr(flow.id)) errors.push('"id" do fluxo obrigatório');
+  // O id vira nome de arquivo (flows/<id>.json) e chave de registro: só letras, números, "_" e "-" (T5).
+  else if (!FLOW_ID_RE.test(flow.id)) errors.push(`"id" do fluxo inválido "${flow.id}": use 1-64 caracteres entre letras, números, _ e -`);
   if (!Number.isInteger(flow.version) || flow.version < 1) errors.push('"version" deve ser inteiro >= 1');
   if (!flow.nodes || typeof flow.nodes !== 'object' || !Object.keys(flow.nodes).length) {
     errors.push('"nodes" obrigatório e não vazio');

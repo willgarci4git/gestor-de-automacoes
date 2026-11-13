@@ -79,15 +79,31 @@ export class VarContext {
 const TEMPLATE_RE = /\{\{\s*([\w.]+)\s*\}\}/g;
 
 /**
+ * Neutraliza marcadores de template em VALORES vindos de variáveis (dados do usuário, respostas de
+ * integrações etc.). Sem isso, um cliente que digite "{{secrets.X}}" teria o texto expandido para o
+ * segredo real pelo worker de integração (injeção de template de segundo nível — CWE-1336, ameaça T2).
+ * "{{" vira "{ {" e "}}" vira "} }": o conteúdo continua legível e nunca mais casa com um placeholder.
+ */
+export function neutralizeTemplateMarkers(value: unknown): unknown {
+  if (typeof value === 'string') return value.replace(/\{\{/g, '{ {').replace(/\}\}/g, '} }');
+  if (Array.isArray(value)) return value.map(neutralizeTemplateMarkers);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, neutralizeTemplateMarkers(v)]));
+  }
+  return value;
+}
+
+/**
  * Renderiza "Olá {{contact.first_name}}". Variáveis ausentes viram string vazia.
- * Placeholders de secrets.* são preservados intactos para o worker de integração.
+ * Placeholders de secrets.* são preservados intactos para o worker de integração; os valores
+ * inseridos têm marcadores neutralizados (só o texto do fluxo pode referenciar segredos).
  */
 export function renderTemplate(tpl: string, ctx: VarContext): string {
   return tpl.replace(TEMPLATE_RE, (whole, path: string) => {
     if (path.startsWith('secrets.')) return whole;
     const v = ctx.get(path);
     if (v == null) return '';
-    return typeof v === 'object' ? JSON.stringify(v) : String(v);
+    return String(neutralizeTemplateMarkers(typeof v === 'object' ? JSON.stringify(v) : String(v)));
   });
 }
 
@@ -96,7 +112,7 @@ export function renderDeep(value: unknown, ctx: VarContext): unknown {
   if (typeof value === 'string') {
     // "{{session.x}}" sozinho preserva o tipo original (número, objeto...)
     const single = /^\{\{\s*([\w.]+)\s*\}\}$/.exec(value);
-    if (single && !single[1].startsWith('secrets.')) return ctx.get(single[1]);
+    if (single && !single[1].startsWith('secrets.')) return neutralizeTemplateMarkers(ctx.get(single[1]));
     return renderTemplate(value, ctx);
   }
   if (Array.isArray(value)) return value.map((v) => renderDeep(v, ctx));

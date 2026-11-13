@@ -1,6 +1,6 @@
 {
   "name": "gestor-de-automacoes",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Framework agnóstico de canal para bots de atendimento baseados em fluxos declarativos (State Engine).",
   "type": "module",
   "private": true,
