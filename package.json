@@ -17,7 +17,7 @@
     "import-bundle": "node --disable-warning=ExperimentalWarning scripts/import-bundle.ts"
   },
   "devDependencies": {
-    "@types/node": "^22.18.0",
+    "@types/node": "^26.6.6",
     "typescript": "^5.9.0"
   }
 }
