@@ -14,7 +14,7 @@ import { TelegramChannel } from '../channels/telegram.ts';
 import { InstagramChannel } from '../channels/instagram.ts';
 import type { ChannelAdapter } from '../channels/types.ts';
 import { createHttpServer } from './http.ts';
-import { checkStartupSecurity } from './security.ts';
+import { checkStartupSecurity, parseOperatorTokens } from './security.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const env = process.env;
@@ -25,7 +25,7 @@ let storage;
 if (dbPath === ':memory:') storage = new MemoryStorage();
 else {
   mkdirSync(dirname(dbPath), { recursive: true });
-  storage = new SqliteStorage(dbPath);
+  storage = new SqliteStorage(dbPath, { encryptionKey: env.DATA_ENCRYPTION_KEY || undefined });
 }
 
 const adapters: ChannelAdapter[] = [];
@@ -69,7 +69,20 @@ if (security.fatal) {
   logger.error('startup_refused', { reason: security.fatal });
   process.exit(1);
 }
-const server = createHttpServer(app, { tenantId: env.TENANT_ID ?? 'default', adminToken: env.ADMIN_TOKEN, publicDir: resolve(root, 'public') });
+const tenantId = env.TENANT_ID ?? 'default';
+const server = createHttpServer(app, {
+  tenantId,
+  adminToken: env.ADMIN_TOKEN,
+  adminTokens: parseOperatorTokens(env.ADMIN_TOKENS),
+  publicDir: resolve(root, 'public'),
+  trustProxy: env.TRUST_PROXY === '1',
+  hsts: env.HSTS === '1' || (env.NODE_ENV === 'production' && env.TRUST_PROXY === '1'),
+  webchat: {
+    auth: env.WEBCHAT_AUTH === 'off' ? 'off' : 'token',
+    secret: env.WEBCHAT_SECRET || undefined,
+    tenants: (env.WEBCHAT_TENANTS ?? tenantId).split(',').map((t) => t.trim()).filter(Boolean),
+  },
+});
 // Limites contra conexões lentas e esgotamento de sockets (T7). Valores ajustáveis por ambiente.
 server.requestTimeout = Number(env.HTTP_REQUEST_TIMEOUT_MS ?? 30_000);
 server.headersTimeout = Number(env.HTTP_HEADERS_TIMEOUT_MS ?? 15_000);

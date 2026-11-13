@@ -12,7 +12,7 @@ class StudioState extends EventTarget {
     const saved = store.get(KEY, null);
     this.flows = saved?.flows ?? byId(data.flows);
     this.tenants = saved?.tenants ?? byId(data.tenants);
-    this.secrets = saved?.secrets ?? { leads_webhook_url: 'https://script.google.com/macros/s/EXEMPLO/exec' };
+    this.secrets = { leads_webhook_url: 'https://script.google.com/macros/s/EXEMPLO/exec' };
     this.builtAt = data.builtAt;
   }
 
@@ -29,7 +29,8 @@ class StudioState extends EventTarget {
   }
 
   save() {
-    store.set(KEY, { flows: this.flows, tenants: this.tenants, secrets: this.secrets });
+    // Segredos de teste NÃO são gravados no navegador (T16): use só valores fictícios no Studio.
+    store.set(KEY, { flows: this.flows, tenants: this.tenants });
     this.dispatchEvent(new Event('change'));
   }
 

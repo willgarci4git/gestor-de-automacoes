@@ -31,7 +31,11 @@ export class WhatsAppChannel implements ChannelAdapter {
   }
 
   verifyChallenge(query: URLSearchParams): string | null {
-    return query.get('hub.mode') === 'subscribe' && query.get('hub.verify_token') === this.cfg.verifyToken ? query.get('hub.challenge') : null;
+    // Comparação em tempo constante (T15).
+    const got = Buffer.from(query.get('hub.verify_token') ?? '');
+    const exp = Buffer.from(this.cfg.verifyToken);
+    const ok = got.length === exp.length && timingSafeEqual(got, exp);
+    return query.get('hub.mode') === 'subscribe' && ok ? query.get('hub.challenge') : null;
   }
 
   verifySignature(rawBody: string | Buffer, header: string | undefined): boolean {

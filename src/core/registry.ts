@@ -115,7 +115,7 @@ export class FlowRegistry {
       });
     }
     const byText = text
-      ? find((t) => (t.kind === 'keyword' && matchesAny(text, t.values)) || (t.kind === 'regex' && new RegExp(t.pattern!, 'i').test(text)))
+      ? find((t) => (t.kind === 'keyword' && matchesAny(text, t.values)) || (t.kind === 'regex' && new RegExp(t.pattern!, 'i').test(text.slice(0, 500))))
       : undefined;
     return byText ?? find((t) => t.kind === 'default');
   }

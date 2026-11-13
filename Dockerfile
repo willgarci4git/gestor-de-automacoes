@@ -7,7 +7,8 @@ COPY flows ./flows
 COPY tenants ./tenants
 COPY public ./public
 ENV NODE_ENV=production PORT=3000 DB_PATH=/app/data/bot.db
-RUN mkdir -p /app/data && chown -R node:node /app
+# Código pertence ao root (somente leitura para o processo); só /app/data é gravável pelo usuário node.
+RUN mkdir -p /app/data && chown node:node /app/data && chmod 700 /app/data
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:3000/health || exit 1

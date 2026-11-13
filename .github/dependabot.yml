@@ -1,0 +1,12 @@
+# Atualizações automáticas e alertas de segurança (T14). Ative também, em Settings > Code security,
+# "Dependabot alerts", "Secret scanning" e "Push protection" (gratuitos em repositório público).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly

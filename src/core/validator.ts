@@ -46,6 +46,20 @@ function checkSaveTo(path: unknown, where: string, errors: string[]) {
   }
 }
 
+/** Texto máximo testado por regex de fluxo (o resto da mensagem é ignorado na comparação) — T8. */
+export const REGEX_INPUT_LIMIT = 500;
+
+/**
+ * Heurística contra ReDoS (T8): recusa padrões longos e grupos com quantificador que são
+ * quantificados de novo, como (a+)+, (\w*)*, (a|aa)+ — a causa clássica de backtracking exponencial.
+ */
+export function unsafeRegexReason(pattern: string): string | null {
+  if (pattern.length > 200) return 'padrão com mais de 200 caracteres';
+  if (/\((?:[^()\\]|\\.)*(?:[+*]|\{\d+,\d*\})(?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,\d*\})/.test(pattern)) return 'quantificador aninhado (risco de ReDoS)';
+  if (/\((?:[^()\\]|\\.)*\|(?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,\d*\})/.test(pattern)) return 'alternância repetida (risco de ReDoS)';
+  return null;
+}
+
 function checkValidator(v: ValidatorSpec | undefined, where: string, errors: string[]) {
   if (!v) return;
   if (!VALIDATOR_KINDS.includes(v.kind)) errors.push(`${where}: validator.kind "${v.kind}" desconhecido`);
@@ -53,6 +67,8 @@ function checkValidator(v: ValidatorSpec | undefined, where: string, errors: str
   if (v.kind === 'regex') {
     try {
       new RegExp(v.pattern, v.flags);
+      const unsafe = unsafeRegexReason(v.pattern);
+      if (unsafe) errors.push(`${where}: regex recusada "${v.pattern}": ${unsafe}`);
     } catch {
       errors.push(`${where}: regex inválida "${v.pattern}"`);
     }
@@ -69,6 +85,8 @@ function checkNodeSchema(id: string, node: FlowNode, errors: string[]) {
   switch (node.type) {
     case 'message':
       need(isStr(node.text) || !!node.media?.url || !!node.template, 'precisa de "text", "media.url" ou "template"');
+      // Mídia só por https (ou variável que o motor resolve): evita links javascript:/data: no widget (T13).
+      if (node.media?.url !== undefined) need(typeof node.media.url === 'string' && /^(https:\/\/|\{\{)/i.test(node.media.url), '"media.url" deve começar com https://');
       if (node.template) {
         need(isStr(node.template.name) && isStr(node.template.language), 'template precisa de "name" e "language"');
         need(isStr(node.text), 'template precisa de "text" (fallback para canais sem modelos)');
@@ -198,6 +216,8 @@ export function validateFlow(flow: FlowDefinition, flowExists?: (flowId: string)
     if (t.kind === 'regex') {
       try {
         new RegExp(t.pattern ?? '');
+        const unsafe = unsafeRegexReason(t.pattern ?? '');
+        if (unsafe) errors.push(`trigger regex recusada "${t.pattern}": ${unsafe}`);
       } catch {
         errors.push(`trigger regex inválida "${t.pattern}"`);
       }

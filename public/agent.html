@@ -48,8 +48,13 @@
 </main>
 <script>
   const $ = id => document.getElementById(id);
+  // O token fica só nesta aba (sessionStorage) e some ao fechá-la; o nome do atendente pode persistir (T6).
+  const tab = { get(k){ try { return sessionStorage.getItem(k) || ''; } catch { return ''; } }, set(k,v){ try { sessionStorage.setItem(k,v); } catch {} } };
   const store = { get(k){ try { return localStorage.getItem(k) || ''; } catch { return ''; } }, set(k,v){ try { localStorage.setItem(k,v); } catch {} } };
-  $('token').value = store.get('ag_token'); $('agent').value = store.get('ag_name') || 'Atendente';
+  try { localStorage.removeItem('ag_token'); } catch {} // remove token salvo por versões anteriores
+  $('token').value = tab.get('ag_token'); $('agent').value = store.get('ag_name') || 'Atendente';
+  // Mascara CPF no contexto exibido ao atendente (T9): mostra só os 2 últimos dígitos.
+  const maskCpf = s => s.replace(/\b(\d{3})\.?(\d{3})\.?(\d{3})-?(\d{2})\b/g, '***.***.***-$4');
   let tickets = [], selected = null, es = null;
   const headers = () => ({ 'content-type':'application/json', 'x-admin-token': $('token').value });
 
@@ -74,25 +79,33 @@
   function renderDetail() {
     const t = tickets.find(x => x.id === selected); $('tr').innerHTML = '';
     if (!t) { $('ctx').textContent = 'Selecione um ticket.'; return; }
-    $('ctx').textContent = 'Contexto do bot:\n' + JSON.stringify(t.context, null, 2);
+    $('ctx').textContent = 'Contexto do bot:\n' + maskCpf(JSON.stringify(t.context, null, 2));
     t.transcript.forEach(e => { const d = document.createElement('div'); d.className = 'e ' + e.from; d.textContent = e.text; $('tr').appendChild(d); });
     $('tr').scrollTop = $('tr').scrollHeight;
   }
   async function act(path, body) {
     if (!selected) return;
     const r = await fetch(`/handoff/tickets/${selected}/${path}`, { method:'POST', headers: headers(), body: JSON.stringify(body || {}) });
-    if (!r.ok) alert('Falha: ' + (await r.text()));
+    if (!r.ok) $('ctx').textContent = 'Falha: ' + (await r.text());
     load();
   }
   $('f').onsubmit = e => { e.preventDefault(); const text = $('msg').value.trim(); if (!text) return; $('msg').value = ''; act('reply', { text, agent: $('agent').value }); };
   $('accept').onclick = () => act('accept', { agent: $('agent').value });
   $('close').onclick = () => act('close');
   $('status').onchange = load;
-  $('connect').onclick = () => {
-    store.set('ag_token', $('token').value); store.set('ag_name', $('agent').value);
+  // O token nunca vai na URL: troca-se por um ticket de uso único (60 s) para abrir o tempo real (T6).
+  async function openStream() {
+    const r = await fetch('/handoff/stream-ticket', { method: 'POST', headers: headers() });
+    if (!r.ok) return;
+    const { ticket } = await r.json();
     if (es) es.close();
-    es = new EventSource('/handoff/stream?token=' + encodeURIComponent($('token').value));
+    es = new EventSource('/handoff/stream?ticket=' + encodeURIComponent(ticket));
     es.addEventListener('ticket', load);
+    es.onerror = () => { es.close(); setTimeout(openStream, 5000); };
+  }
+  $('connect').onclick = () => {
+    tab.set('ag_token', $('token').value); store.set('ag_name', $('agent').value);
+    openStream();
     load();
   };
   $('connect').click();

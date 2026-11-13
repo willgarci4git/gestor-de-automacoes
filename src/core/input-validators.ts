@@ -57,7 +57,8 @@ export function validateAnswer(spec: ValidatorSpec | undefined, raw: string): Va
       return validCpf(text) ? { ok: true, value: text.replace(/\D/g, '') } : { ok: false };
     case 'regex': {
       const s = spec as { pattern: string; flags?: string };
-      return new RegExp(s.pattern, s.flags).test(text) ? { ok: true, value: text } : { ok: false };
+      // Só os primeiros 500 caracteres entram na regex (T8: limita o custo de backtracking).
+      return new RegExp(s.pattern, s.flags).test(text.slice(0, 500)) ? { ok: true, value: text } : { ok: false };
     }
     default:
       return { ok: false };

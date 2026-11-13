@@ -45,7 +45,9 @@ before(async () => {
     clock: () => BUSINESS_HOURS,
   });
   app.start();
-  server = createHttpServer(app, { tenantId: 'clinica', adminToken: ADMIN, publicDir: new URL('../public', import.meta.url).pathname });
+  // Estes testes cobrem o fluxo de negócio com ids fixos; a sessão assinada do webchat e a allowlist
+// de tenants (T4/T11) são verificadas em test/security-http.test.ts.
+  server = createHttpServer(app, { tenantId: 'clinica', adminToken: ADMIN, publicDir: new URL('../public', import.meta.url).pathname, webchat: { auth: 'off', tenants: ['*'] } });
   base = await listen(server);
 });
 

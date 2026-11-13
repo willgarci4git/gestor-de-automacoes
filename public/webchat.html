@@ -35,10 +35,17 @@
 <script>
   const tenant = new URLSearchParams(location.search).get('tenant') || 'default';
   const store = { get(k){ try { return localStorage.getItem(k); } catch { return null; } }, set(k,v){ try { localStorage.setItem(k,v); } catch {} } };
-  let userId = store.get('wc_user') || ('u' + Math.random().toString(36).slice(2, 10));
-  store.set('wc_user', userId);
+  // Sessão emitida e assinada pelo servidor (o navegador não escolhe o próprio id) — T4.
+  const KEY = 'wc_session_' + tenant;
+  let session = null;
+  try { session = JSON.parse(store.get(KEY) || 'null'); } catch {}
+  async function newSession() {
+    const r = await fetch(`/webchat/${encodeURIComponent(tenant)}/session`, { method: 'POST' });
+    if (!r.ok) throw new Error('Não foi possível iniciar a conversa (' + r.status + ')');
+    session = await r.json(); store.set(KEY, JSON.stringify(session));
+  }
+  const auth = () => (session && session.token ? { 'x-webchat-token': session.token } : {});
   const log = document.getElementById('log');
-  document.getElementById('who').textContent = 'sessão ' + userId + ' · tenant ' + tenant;
   const seen = new Set();
 
   function render(entry) {
@@ -46,8 +53,9 @@
     const m = entry.message, div = document.createElement('div');
     div.className = 'msg ' + (entry.from === 'user' ? 'user' : 'bot');
     if (m.kind === 'media') {
-      if (m.media.kind === 'image') { const img = document.createElement('img'); img.src = m.media.url; img.className = 'media'; div.appendChild(img); }
-      else { const a = document.createElement('a'); a.href = m.media.url; a.textContent = m.media.filename || m.media.url; a.target = '_blank'; div.appendChild(a); }
+      if (m.media.kind === 'image' && /^https:\/\//i.test(m.media.url)) { const img = document.createElement('img'); img.src = m.media.url; img.className = 'media'; div.appendChild(img); }
+      else if (/^https:\/\//i.test(m.media.url)) { const a = document.createElement('a'); a.href = m.media.url; a.textContent = m.media.filename || m.media.url; a.target = '_blank'; a.rel = 'noopener noreferrer'; div.appendChild(a); }
+      else div.append(m.media.filename || 'arquivo'); // só links https (T13)
       if (m.media.caption) div.append('\n' + m.media.caption);
     } else div.textContent = m.text;
     if (m.kind === 'choice') {
@@ -60,19 +68,24 @@
   }
 
   async function post(body) {
-    await fetch(`/webchat/${tenant}/messages`, { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ userId, ...body }) });
+    const r = await fetch(`/webchat/${encodeURIComponent(tenant)}/messages`, { method:'POST', headers:{'content-type':'application/json', ...auth()}, body: JSON.stringify({ userId: session.userId, ...body }) });
+    if (r.status === 429) render({ id: 'rl' + Date.now(), from: 'bot', message: { kind: 'text', text: 'Muitas mensagens seguidas. Aguarde alguns segundos.' } });
   }
 
   async function connect() {
-    const hist = await fetch(`/webchat/${tenant}/history?userId=${userId}`).then(r => r.json()).catch(() => []);
-    hist.forEach(render);
-    const es = new EventSource(`/webchat/${tenant}/stream?userId=${userId}`);
+    if (!session) await newSession();
+    let r = await fetch(`/webchat/${encodeURIComponent(tenant)}/history?userId=${session.userId}`, { headers: auth() });
+    if (r.status === 401) { await newSession(); r = await fetch(`/webchat/${encodeURIComponent(tenant)}/history?userId=${session.userId}`, { headers: auth() }); }
+    document.getElementById('who').textContent = 'sessão ' + session.userId.slice(0, 9) + '… · tenant ' + tenant;
+    (r.ok ? await r.json() : []).forEach(render);
+    // EventSource não envia cabeçalhos: o token da própria sessão vai na URL (só dá acesso a esta conversa).
+    const es = new EventSource(`/webchat/${encodeURIComponent(tenant)}/stream?userId=${session.userId}` + (session.token ? `&wt=${encodeURIComponent(session.token)}` : ''));
     es.addEventListener('message', e => render(JSON.parse(e.data)));
   }
 
   document.getElementById('f').onsubmit = e => { e.preventDefault(); const t = document.getElementById('t'); const text = t.value.trim(); if (!text) return; t.value = ''; post({ text }); };
-  document.getElementById('reset').onclick = () => { store.set('wc_user', 'u' + Math.random().toString(36).slice(2, 10)); location.reload(); };
-  connect();
+  document.getElementById('reset').onclick = () => { store.set(KEY, ''); location.reload(); };
+  connect().catch(e => render({ id: 'err', from: 'bot', message: { kind: 'text', text: e.message } }));
 </script>
 </body>
 </html>

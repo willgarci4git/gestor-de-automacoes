@@ -4,6 +4,8 @@
  * interface `Storage` sobre Postgres (as queries abaixo são SQL padrão e portam diretamente).
  */
 import { DatabaseSync } from 'node:sqlite';
+import { chmodSync, existsSync } from 'node:fs';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import type { Command, Contact, InboundEvent, Session } from '../core/types.ts';
 import { ConflictError, type HandoffTicket, type OutboxRecord, type ScheduledJob, type Storage, type TurnCommit } from './types.ts';
 
@@ -25,12 +27,63 @@ CREATE INDEX IF NOT EXISTS tickets_conv ON tickets(conversation_id, status);
 
 type Row = Record<string, unknown>;
 
+/**
+ * Criptografia em repouso (T9): AES-256-GCM nos blobs JSON (sessões, contatos, tickets, outbox e jobs),
+ * que guardam nome, telefone, CPF e o texto das conversas. Formato "enc:v1:<base64(iv|tag|cifra)>".
+ * Linhas antigas sem prefixo continuam legíveis (migração gradual: regravadas cifradas no próximo uso).
+ */
+export class FieldCipher {
+  private readonly key: Buffer;
+  constructor(key: string) {
+    // 64 caracteres hex ou base64 de 32 bytes são usados direto; qualquer outro segredo com 32+
+    // caracteres (ex.: gerado pelo provedor) é derivado por SHA-256.
+    const b64 = /^[A-Za-z0-9+/_-]+={0,2}$/.test(key) ? Buffer.from(key, 'base64') : Buffer.alloc(0);
+    if (/^[0-9a-f]{64}$/i.test(key)) this.key = Buffer.from(key, 'hex');
+    else if (b64.length === 32) this.key = b64;
+    else if (key.length >= 32) this.key = createHash('sha256').update(key, 'utf8').digest();
+    else throw new Error('DATA_ENCRYPTION_KEY curta: use 32+ caracteres aleatórios (openssl rand -hex 32)');
+  }
+  seal(plain: string): string {
+    const iv = randomBytes(12);
+    const c = createCipheriv('aes-256-gcm', this.key, iv);
+    const ct = Buffer.concat([c.update(plain, 'utf8'), c.final()]);
+    return 'enc:v1:' + Buffer.concat([iv, c.getAuthTag(), ct]).toString('base64');
+  }
+  open(stored: string): string {
+    if (!stored.startsWith('enc:v1:')) return stored;
+    const b = Buffer.from(stored.slice(7), 'base64');
+    const d = createDecipheriv('aes-256-gcm', this.key, b.subarray(0, 12));
+    d.setAuthTag(b.subarray(12, 28));
+    return Buffer.concat([d.update(b.subarray(28)), d.final()]).toString('utf8');
+  }
+}
+
+export interface SqliteOptions {
+  /** Chave de 32 bytes (hex ou base64). Sem ela os dados ficam em texto claro (aviso no boot em produção). */
+  encryptionKey?: string;
+}
+
 export class SqliteStorage implements Storage {
   private readonly db: DatabaseSync;
+  private readonly cipher?: FieldCipher;
 
-  constructor(path: string) {
+  constructor(path: string, opts: SqliteOptions = {}) {
+    this.cipher = opts.encryptionKey ? new FieldCipher(opts.encryptionKey) : undefined;
     this.db = new DatabaseSync(path);
     this.db.exec(SCHEMA);
+    // Arquivo do banco legível só pelo dono do processo (T9).
+    if (path !== ':memory:') for (const f of [path, `${path}-wal`, `${path}-shm`]) if (existsSync(f)) chmodSync(f, 0o600);
+  }
+
+  private enc(value: unknown): string {
+    const json = JSON.stringify(value);
+    return this.cipher ? this.cipher.seal(json) : json;
+  }
+
+  private dec<T>(stored: unknown): T {
+    const s = String(stored);
+    if (s.startsWith('enc:v1:') && !this.cipher) throw new Error('dados cifrados no banco, mas DATA_ENCRYPTION_KEY não foi informada');
+    return JSON.parse(this.cipher ? this.cipher.open(s) : s) as T;
   }
 
   private tx<T>(fn: () => T): T {
@@ -47,20 +100,26 @@ export class SqliteStorage implements Storage {
 
   getSession(id: string): Session | undefined {
     const row = this.db.prepare('SELECT data FROM sessions WHERE conversation_id = ?').get(id) as Row | undefined;
-    return row ? JSON.parse(row.data as string) : undefined;
+    return row ? this.dec(row.data) : undefined;
   }
 
   getContact(id: string): Contact | undefined {
     const row = this.db.prepare('SELECT data FROM contacts WHERE conversation_id = ?').get(id) as Row | undefined;
-    return row ? JSON.parse(row.data as string) : undefined;
+    return row ? this.dec(row.data) : undefined;
   }
 
   listContacts(filter: { tag?: string; limit?: number } = {}): Contact[] {
+    const limit = filter.limit ?? 10_000;
+    if (this.cipher) {
+      // Com criptografia o SQLite não enxerga as etiquetas: filtra em memória após decifrar.
+      const all = (this.db.prepare('SELECT data FROM contacts').all() as Row[]).map((r) => this.dec<Contact>(r.data));
+      return (filter.tag ? all.filter((c) => c.tags?.includes(filter.tag!)) : all).slice(0, limit);
+    }
     // Filtro por etiqueta via JSON1 (embutido no SQLite): evita carregar a base inteira.
     const rows = (filter.tag
-      ? this.db.prepare("SELECT data FROM contacts WHERE EXISTS (SELECT 1 FROM json_each(json_extract(data, '$.tags')) WHERE value = ?) LIMIT ?").all(filter.tag, filter.limit ?? 10_000)
-      : this.db.prepare('SELECT data FROM contacts LIMIT ?').all(filter.limit ?? 10_000)) as Row[];
-    return rows.map((r) => JSON.parse(r.data as string));
+      ? this.db.prepare("SELECT data FROM contacts WHERE EXISTS (SELECT 1 FROM json_each(json_extract(data, '$.tags')) WHERE value = ?) LIMIT ?").all(filter.tag, limit)
+      : this.db.prepare('SELECT data FROM contacts LIMIT ?').all(limit)) as Row[];
+    return rows.map((r) => this.dec<Contact>(r.data));
   }
 
   deleteContact(conversationId: string): void {
@@ -77,7 +136,7 @@ export class SqliteStorage implements Storage {
   commitTurn(t: TurnCommit): void {
     this.tx(() => {
       const s = t.session;
-      const data = JSON.stringify(s);
+      const data = this.enc(s);
       if (t.expectedRev === 0) {
         const exists = this.db.prepare('SELECT 1 FROM sessions WHERE conversation_id = ?').get(s.conversationId);
         if (exists) throw new ConflictError(s.conversationId);
@@ -90,17 +149,17 @@ export class SqliteStorage implements Storage {
       }
       this.db
         .prepare('INSERT INTO contacts (conversation_id, data) VALUES (?, ?) ON CONFLICT(conversation_id) DO UPDATE SET data = excluded.data')
-        .run(t.contact.conversationId, JSON.stringify(t.contact));
+        .run(t.contact.conversationId, this.enc(t.contact));
       this.db.prepare('INSERT INTO processed_events (event_id, at) VALUES (?, ?)').run(t.eventId, Date.now());
       const ins = this.db.prepare('INSERT INTO outbox (command) VALUES (?)');
-      for (const c of t.commands) ins.run(JSON.stringify(c));
+      for (const c of t.commands) ins.run(this.enc(c));
     });
   }
 
   private toOutbox(r: Row): OutboxRecord {
     return {
       id: Number(r.id),
-      command: JSON.parse(r.command as string) as Command,
+      command: this.dec<Command>(r.command),
       attempts: Number(r.attempts),
       availableAt: Number(r.available_at),
       lastError: (r.last_error as string) ?? undefined,
@@ -134,12 +193,12 @@ export class SqliteStorage implements Storage {
   scheduleJob(job: ScheduledJob): void {
     this.db
       .prepare('INSERT INTO jobs (id, due_at, event) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET due_at = excluded.due_at, event = excluded.event')
-      .run(job.id, job.dueAt, JSON.stringify(job.event));
+      .run(job.id, job.dueAt, this.enc(job.event));
   }
 
   dueJobs(now: number, limit: number): ScheduledJob[] {
     const rows = this.db.prepare('SELECT * FROM jobs WHERE due_at <= ? ORDER BY due_at LIMIT ?').all(now, limit) as Row[];
-    return rows.map((r) => ({ id: r.id as string, dueAt: Number(r.due_at), event: JSON.parse(r.event as string) as InboundEvent }));
+    return rows.map((r) => ({ id: r.id as string, dueAt: Number(r.due_at), event: this.dec<InboundEvent>(r.event) }));
   }
 
   deleteJob(id: string): void {
@@ -151,26 +210,26 @@ export class SqliteStorage implements Storage {
       .prepare(
         'INSERT INTO tickets (id, conversation_id, queue, status, data) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, queue = excluded.queue, data = excluded.data',
       )
-      .run(t.id, t.conversationId, t.queue, t.status, JSON.stringify(t));
+      .run(t.id, t.conversationId, t.queue, t.status, this.enc(t));
   }
 
   getTicket(id: string): HandoffTicket | undefined {
     const row = this.db.prepare('SELECT data FROM tickets WHERE id = ?').get(id) as Row | undefined;
-    return row ? JSON.parse(row.data as string) : undefined;
+    return row ? this.dec(row.data) : undefined;
   }
 
   openTicketFor(conversationId: string): HandoffTicket | undefined {
     const row = this.db
       .prepare("SELECT data FROM tickets WHERE conversation_id = ? AND status != 'closed' ORDER BY rowid DESC LIMIT 1")
       .get(conversationId) as Row | undefined;
-    return row ? JSON.parse(row.data as string) : undefined;
+    return row ? this.dec(row.data) : undefined;
   }
 
   listTickets(filter: { queue?: string; status?: HandoffTicket['status'] } = {}): HandoffTicket[] {
     const rows = this.db
       .prepare('SELECT data FROM tickets WHERE (? IS NULL OR queue = ?) AND (? IS NULL OR status = ?) ORDER BY rowid')
       .all(filter.queue ?? null, filter.queue ?? null, filter.status ?? null, filter.status ?? null) as Row[];
-    return rows.map((r) => JSON.parse(r.data as string));
+    return rows.map((r) => this.dec(r.data));
   }
 
   pruneProcessedEvents(olderThanMs: number): void {

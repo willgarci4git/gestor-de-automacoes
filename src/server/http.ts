@@ -11,11 +11,15 @@
  *   POST /admin/contacts/cleanup limpeza de contatos inativos (dryRun por padrão; preserva etiquetas VIP)
  *   /admin/*   fluxos, validação, sessões, dead letters      (x-admin-token)
  *   /handoff/* tickets de atendimento humano + SSE             (x-admin-token)
+ *
+ * Segurança (ADR-003): sessão de webchat assinada pelo servidor (T4), ticket de uso único para o SSE
+ * do console (T6), limites de taxa e de conexões (T7), tokens por operador + trilha de auditoria (T10),
+ * allowlist de tenants no webchat (T11) e cabeçalhos de segurança com CSP por hash (T12).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { BotApp } from '../runtime/app.ts';
 import type { WhatsAppChannel } from '../channels/whatsapp.ts';
 import type { TelegramChannel } from '../channels/telegram.ts';
@@ -26,16 +30,93 @@ import type { FlowDefinition } from '../core/types.ts';
 
 export interface ServerOptions {
   tenantId: string;
+  /** Token do operador "admin" (compatível com versões anteriores). */
   adminToken?: string;
+  /** Tokens por operador (nome -> token): identificam quem fez cada ação na trilha de auditoria (T10). */
+  adminTokens?: Record<string, string>;
   publicDir: string;
   maxBodyBytes?: number;
+  webchat?: {
+    /** 'token' (padrão): toda chamada exige a sessão assinada emitida por POST /webchat/:tenant/session (T4). */
+    auth?: 'token' | 'off';
+    /** Chave HMAC das sessões. Padrão: aleatória por processo (sessões expiram ao reiniciar). */
+    secret?: string;
+    /** Tenants aceitos no webchat (T11). Padrão: só o tenantId do servidor. */
+    tenants?: string[];
+  };
+  /** Usa o primeiro IP de X-Forwarded-For (atrás de proxy confiável, ex.: Render). */
+  trustProxy?: boolean;
+  /** Envia Strict-Transport-Security (servidor atrás de HTTPS). */
+  hsts?: boolean;
+  limits?: Partial<Limits>;
+}
+
+export interface Limits {
+  /** Mensagens de webchat por IP por minuto. */
+  webchatPerIpPerMin: number;
+  /** Mensagens por conversa por minuto. */
+  webchatPerConversationPerMin: number;
+  /** Novas sessões de webchat por IP por minuto. */
+  sessionsPerIpPerMin: number;
+  /** Falhas de autenticação administrativa por IP por minuto antes de 429. */
+  authFailuresPerIpPerMin: number;
+  /** Conexões SSE simultâneas por IP e no total. */
+  ssePerIp: number;
+  sseTotal: number;
+}
+
+const DEFAULT_LIMITS: Limits = { webchatPerIpPerMin: 60, webchatPerConversationPerMin: 20, sessionsPerIpPerMin: 10, authFailuresPerIpPerMin: 10, ssePerIp: 5, sseTotal: 500 };
+
+/** Janela fixa por chave (em memória; instância única). Retorna segundos para tentar de novo ou 0. */
+export class RateLimiter {
+  private readonly hits = new Map<string, { n: number; reset: number }>();
+  private readonly now: () => number;
+  constructor(now: () => number = Date.now) {
+    this.now = now;
+  }
+  take(key: string, limit: number, windowMs = 60_000): number {
+    const t = this.now();
+    let h = this.hits.get(key);
+    if (!h || h.reset <= t) {
+      h = { n: 0, reset: t + windowMs };
+      this.hits.set(key, h);
+    }
+    h.n++;
+    if (this.hits.size > 50_000) for (const [k, v] of this.hits) if (v.reset <= t) this.hits.delete(k);
+    return h.n > limit ? Math.ceil((h.reset - t) / 1000) : 0;
+  }
+  peek(key: string, limit: number): boolean {
+    const h = this.hits.get(key);
+    return !!h && h.reset > this.now() && h.n >= limit;
+  }
+}
+
+/** Gera a CSP de uma página HTML autorizando só os <script>/<style> inline dela (por hash SHA-256). */
+export function cspFor(html: string): string {
+  const hashes = (tag: string) =>
+    [...html.matchAll(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, 'gi'))]
+      .filter((m) => !/\ssrc=/.test(m[0].slice(0, m[0].indexOf('>'))))
+      .map((m) => `'sha256-${createHash('sha256').update(m[1]).digest('base64')}'`)
+      .join(' ');
+  return [
+    "default-src 'self'", `script-src 'self' ${hashes('script')}`.trim(), `style-src 'self' ${hashes('style')}`.trim(),
+    "img-src 'self' https: data:", "connect-src 'self'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self'", "object-src 'none'",
+  ].join('; ');
 }
 
 class HttpError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  readonly headers: Record<string, string>;
+  constructor(status: number, message: string, headers: Record<string, string> = {}) {
     super(message);
     this.status = status;
+    this.headers = headers;
+  }
+}
+
+declare module 'node:http' {
+  interface ServerResponse {
+    locals?: { hsts?: boolean };
   }
 }
 
@@ -45,14 +126,27 @@ interface Ctx {
   url: URL;
   params: Record<string, string>;
   raw: Buffer;
+  ip: string;
+  /** Operador autenticado nas rotas administrativas (T10). */
+  actor?: string;
   json<T = any>(): T;
 }
 
 type Handler = (c: Ctx) => Promise<unknown> | unknown;
 
-function send(res: ServerResponse, status: number, body: unknown, type = 'application/json; charset=utf-8') {
+const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'cache-control': 'no-store',
+  'referrer-policy': 'no-referrer',
+  'x-frame-options': 'DENY',
+  'cross-origin-opener-policy': 'same-origin',
+  'cross-origin-resource-policy': 'same-origin',
+  'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+} as const;
+
+function send(res: ServerResponse, status: number, body: unknown, type = 'application/json; charset=utf-8', extra: Record<string, string> = {}) {
   if (res.headersSent) return;
-  res.writeHead(status, { 'content-type': type, 'x-content-type-options': 'nosniff', 'cache-control': 'no-store' });
+  res.writeHead(status, { 'content-type': type, ...SECURITY_HEADERS, ...(res.locals?.hsts ? { 'strict-transport-security': 'max-age=31536000; includeSubDomains' } : {}), ...extra });
   res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
 }
 
@@ -68,7 +162,7 @@ async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
 }
 
 function sse(res: ServerResponse): (event: string, data: unknown) => void {
-  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+  res.writeHead(200, { ...SECURITY_HEADERS, 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
   res.write(': ok\n\n');
   const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
   res.on('close', () => clearInterval(ping));
@@ -81,29 +175,112 @@ export function createHttpServer(app: BotApp, opts: ServerOptions): Server {
     const re = new RegExp('^' + path.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$');
     routes.push({ method, re, handler, admin });
   };
-  const staticFile = (name: string) => readFileSync(join(opts.publicDir, name));
-  const checkAdmin = (req: IncomingMessage) => {
-    if (!opts.adminToken) return; // modo desenvolvimento
-    const got = Buffer.from(String(req.headers['x-admin-token'] ?? new URL(req.url!, 'http://x').searchParams.get('token') ?? ''));
-    const exp = Buffer.from(opts.adminToken);
-    if (got.length !== exp.length || !timingSafeEqual(got, exp)) throw new HttpError(401, 'não autorizado');
+  const limits: Limits = { ...DEFAULT_LIMITS, ...opts.limits };
+  const limiter = new RateLimiter();
+  const tooMany = (retry: number, what: string) => new HttpError(429, `muitas requisições (${what})`, { 'retry-after': String(retry) });
+
+  // Páginas estáticas com CSP calculada a partir do próprio conteúdo (T12).
+  const pages = new Map<string, { body: Buffer; csp: string }>();
+  const page = (name: string) => {
+    let p = pages.get(name);
+    if (!p) {
+      const body = readFileSync(join(opts.publicDir, name));
+      p = { body, csp: cspFor(body.toString('utf8')) };
+      pages.set(name, p);
+    }
+    return p;
   };
+
+  // --- autenticação administrativa: tokens por operador (T10), sem token na query (T6) ----------
+  const operators = Object.entries({ ...(opts.adminToken ? { admin: opts.adminToken } : {}), ...opts.adminTokens }).map(([name, token]) => ({ name, token: Buffer.from(token) }));
+  const checkAdmin = (c: Ctx) => {
+    if (!operators.length) {
+      c.actor = 'dev-inseguro'; // só alcançável com ALLOW_INSECURE_DEV=1 (ver security.ts)
+      return;
+    }
+    const failKey = `authfail:${c.ip}`;
+    if (limiter.peek(failKey, limits.authFailuresPerIpPerMin)) throw tooMany(60, 'autenticação');
+    const got = Buffer.from(String(c.req.headers['x-admin-token'] ?? ''));
+    const op = operators.find((o) => o.token.length === got.length && timingSafeEqual(o.token, got));
+    if (!op) {
+      limiter.take(failKey, limits.authFailuresPerIpPerMin);
+      app.logger.warn('audit', { action: 'auth_failed', path: c.url.pathname, ip: c.ip });
+      throw new HttpError(401, 'não autorizado');
+    }
+    c.actor = op.name;
+  };
+  /** Trilha de auditoria (T10): quem, o quê, em qual alvo e de onde. */
+  const audit = (c: Ctx, action: string, detail: Record<string, unknown> = {}) =>
+    app.logger.info('audit', { actor: c.actor ?? 'anon', action, ip: c.ip, ...detail });
+
+  // --- webchat: allowlist de tenants (T11) e sessão assinada (T4) --------------------------------
+  const wcAuth = opts.webchat?.auth ?? 'token';
+  const wcSecret = opts.webchat?.secret ?? randomBytes(32).toString('hex');
+  const wcTenants = new Set(opts.webchat?.tenants ?? [opts.tenantId]);
   const tenantOk = (t: string) => {
     if (!/^[\w-]{1,64}$/.test(t)) throw new HttpError(400, 'tenant inválido');
     return t;
   };
+  const webchatTenant = (t: string) => {
+    tenantOk(t);
+    if (!wcTenants.has('*') && !wcTenants.has(t)) throw new HttpError(404, 'tenant não disponível no webchat');
+    return t;
+  };
+  const sign = (tenant: string, userId: string) => createHmac('sha256', wcSecret).update(`webchat:${tenant}:${userId}`).digest('base64url');
+  const checkWebchat = (c: Ctx, tenant: string, userId: string) => {
+    if (!/^[\w-]{1,64}$/.test(userId)) throw new HttpError(400, 'userId inválido');
+    if (wcAuth === 'off') return;
+    const got = Buffer.from(String(c.req.headers['x-webchat-token'] ?? c.url.searchParams.get('wt') ?? ''));
+    const exp = Buffer.from(sign(tenant, userId));
+    if (got.length !== exp.length || !timingSafeEqual(got, exp)) throw new HttpError(401, 'sessão de webchat inválida');
+  };
+
+  // --- limites de SSE (T7) ------------------------------------------------------------------------
+  const sseByIp = new Map<string, number>();
+  let sseTotal = 0;
+  const sseOpen = (c: Ctx) => {
+    const n = sseByIp.get(c.ip) ?? 0;
+    if (n >= limits.ssePerIp || sseTotal >= limits.sseTotal) throw tooMany(30, 'conexões em tempo real');
+    sseByIp.set(c.ip, n + 1);
+    sseTotal++;
+    c.res.on('close', () => {
+      const m = (sseByIp.get(c.ip) ?? 1) - 1;
+      if (m <= 0) sseByIp.delete(c.ip);
+      else sseByIp.set(c.ip, m);
+      sseTotal--;
+    });
+  };
+
+  // --- tickets de uso único para o SSE do console (T6) --------------------------------------------
+  const streamTickets = new Map<string, { actor: string; exp: number }>();
 
   // --- infraestrutura -------------------------------------------------------
   route('GET', '/health', () => ({ status: 'ok', flows: app.registry.list().length }));
   route('GET', '/metrics', () => app.metrics.snapshot(), true);
-  route('GET', '/', ({ res }) => send(res, 200, staticFile('webchat.html'), 'text/html; charset=utf-8'));
-  route('GET', '/agent', ({ res }) => send(res, 200, staticFile('agent.html'), 'text/html; charset=utf-8'));
+  const html = (name: string) => ({ res }: Ctx) => {
+    const p = page(name);
+    send(res, 200, p.body, 'text/html; charset=utf-8', { 'content-security-policy': p.csp });
+  };
+  route('GET', '/', html('webchat.html'));
+  route('GET', '/agent', html('agent.html'));
 
   // --- webchat --------------------------------------------------------------
+  route('POST', '/webchat/:tenant/session', (c) => {
+    const tenant = webchatTenant(c.params.tenant);
+    const retry = limiter.take(`wcsess:${c.ip}`, limits.sessionsPerIpPerMin);
+    if (retry) throw tooMany(retry, 'novas sessões');
+    const userId = 'w' + randomBytes(16).toString('hex');
+    send(c.res, 201, { userId, token: wcAuth === 'off' ? null : sign(tenant, userId) });
+  });
   route('POST', '/webchat/:tenant/messages', async (c) => {
+    const tenant = webchatTenant(c.params.tenant);
+    const body = c.json();
+    checkWebchat(c, tenant, String(body?.userId ?? ''));
+    const retry = limiter.take(`wcip:${c.ip}`, limits.webchatPerIpPerMin) || limiter.take(`wcconv:${tenant}:${body.userId}`, limits.webchatPerConversationPerMin);
+    if (retry) throw tooMany(retry, 'mensagens');
     let ev;
     try {
-      ev = app.webchat.toInbound(tenantOk(c.params.tenant), c.json());
+      ev = app.webchat.toInbound(tenant, body);
     } catch (e) {
       throw new HttpError(400, (e as Error).message);
     }
@@ -111,14 +288,18 @@ export function createHttpServer(app: BotApp, opts: ServerOptions): Server {
     send(c.res, 202, { status: r.status, eventId: ev.eventId });
   });
   route('GET', '/webchat/:tenant/history', (c) => {
+    const tenant = webchatTenant(c.params.tenant);
     const userId = c.url.searchParams.get('userId') ?? '';
-    return app.webchat.getHistory(`${tenantOk(c.params.tenant)}:webchat:${userId}`);
+    checkWebchat(c, tenant, userId);
+    return app.webchat.getHistory(`${tenant}:webchat:${userId}`);
   });
   route('GET', '/webchat/:tenant/stream', (c) => {
+    const tenant = webchatTenant(c.params.tenant);
     const userId = c.url.searchParams.get('userId') ?? '';
-    if (!/^[\w-]{1,64}$/.test(userId)) throw new HttpError(400, 'userId inválido');
+    checkWebchat(c, tenant, userId);
+    sseOpen(c);
     const push = sse(c.res);
-    const off = app.webchat.subscribe(`${tenantOk(c.params.tenant)}:webchat:${userId}`, (entry) => push('message', entry));
+    const off = app.webchat.subscribe(`${tenant}:webchat:${userId}`, (entry) => push('message', entry));
     c.res.on('close', off);
   });
 
@@ -184,8 +365,9 @@ export function createHttpServer(app: BotApp, opts: ServerOptions): Server {
   route('POST', '/admin/flows', (c) => {
     const body = c.json<FlowDefinition | FlowDefinition[]>();
     try {
-      const results = app.registry.publish(...(Array.isArray(body) ? body : [body]));
-      app.logger.info('flows_published', { flows: Object.keys(results) });
+      const list = Array.isArray(body) ? body : [body];
+      const results = app.registry.publish(...list);
+      audit(c, 'flows_published', { flows: list.map((f) => `${f?.id}@${f?.version}`), sha256: createHash('sha256').update(c.raw).digest('hex') });
       send(c.res, 201, results);
     } catch (e) {
       if (e instanceof FlowValidationError) return send(c.res, 422, e.results);
@@ -194,12 +376,14 @@ export function createHttpServer(app: BotApp, opts: ServerOptions): Server {
   }, true);
   route('GET', '/admin/sessions/:conversationId', (c) => {
     const id = decodeURIComponent(c.params.conversationId);
+    audit(c, 'session_read', { conversationId: id });
     return { session: app.storage.getSession(id) ?? null, contact: app.storage.getContact(id) ?? null };
   }, true);
   route('GET', '/admin/dead-letters', () => app.storage.deadLetters(), true);
   route('GET', '/admin/tenants', () => app.tenants.list(), true);
   route('POST', '/admin/contacts/cleanup', (c) => {
     const { inactiveDays, keepTags, tenantId, dryRun } = c.json();
+    audit(c, 'contacts_cleanup', { inactiveDays, tenantId, dryRun: dryRun !== false });
     try {
       return app.cleanupContacts({
         inactiveDays: Number(inactiveDays),
@@ -214,6 +398,7 @@ export function createHttpServer(app: BotApp, opts: ServerOptions): Server {
   route('POST', '/admin/broadcast', async (c) => {
     const { broadcastId, flowId, tag, tenantId, vars } = c.json();
     if (!broadcastId || !flowId) throw new HttpError(400, 'broadcastId e flowId obrigatórios');
+    audit(c, 'broadcast', { broadcastId: String(broadcastId), flowId: String(flowId), tag, tenantId });
     try {
       return await app.broadcast({ broadcastId: String(broadcastId), flowId: String(flowId), tag, tenantId, vars });
     } catch (e) {
@@ -236,31 +421,64 @@ export function createHttpServer(app: BotApp, opts: ServerOptions): Server {
       throw e;
     }
   };
-  route('POST', '/handoff/tickets/:id/accept', ticketAction((c) => app.handoff.accept(c.params.id, String(c.json().agent ?? 'atendente'))), true);
-  route('POST', '/handoff/tickets/:id/reply', ticketAction((c) => {
-    const { text, agent } = c.json();
-    if (!text || typeof text !== 'string') throw new HttpError(400, 'text obrigatório');
-    return app.handoff.reply(c.params.id, text.slice(0, 4000), agent);
+  // O nome exibido ao cliente pode ser escolhido pelo atendente, mas a auditoria registra o operador
+  // autenticado (T10): o campo "agent" do corpo não serve como prova de autoria.
+  const agentName = (c: Ctx) => {
+    const a = c.json().agent;
+    return typeof a === 'string' && a.trim() ? a.trim().slice(0, 60) : (c.actor ?? 'atendente');
+  };
+  route('POST', '/handoff/tickets/:id/accept', ticketAction(async (c) => {
+    audit(c, 'ticket_accept', { ticket: c.params.id });
+    return app.handoff.accept(c.params.id, agentName(c));
   }), true);
-  route('POST', '/handoff/tickets/:id/close', ticketAction((c) => app.handoff.close(c.params.id)), true);
+  route('POST', '/handoff/tickets/:id/reply', ticketAction(async (c) => {
+    const { text } = c.json();
+    if (!text || typeof text !== 'string') throw new HttpError(400, 'text obrigatório');
+    audit(c, 'ticket_reply', { ticket: c.params.id, chars: text.length });
+    return app.handoff.reply(c.params.id, text.slice(0, 4000), agentName(c));
+  }), true);
+  route('POST', '/handoff/tickets/:id/close', ticketAction(async (c) => {
+    audit(c, 'ticket_close', { ticket: c.params.id });
+    return app.handoff.close(c.params.id);
+  }), true);
+  // T6: o navegador não manda cabeçalho no EventSource; em vez do token na URL, troca-se o token por
+  // um ticket aleatório de uso único, válido por 60 s.
+  route('POST', '/handoff/stream-ticket', (c) => {
+    const ticket = randomBytes(24).toString('base64url');
+    const t = Date.now();
+    for (const [k, v] of streamTickets) if (v.exp < t) streamTickets.delete(k);
+    streamTickets.set(ticket, { actor: c.actor ?? 'admin', exp: t + 60_000 });
+    return { ticket, expiresInSec: 60 };
+  }, true);
   route('GET', '/handoff/stream', (c) => {
+    const ticket = c.url.searchParams.get('ticket') ?? '';
+    const entry = streamTickets.get(ticket);
+    streamTickets.delete(ticket);
+    if (!entry || entry.exp < Date.now()) checkAdmin(c); // sem ticket válido, exige o cabeçalho
+    else c.actor = entry.actor;
+    sseOpen(c);
     const push = sse(c.res);
     const listener = (e: unknown) => push('ticket', e);
     app.handoff.on('ticket', listener);
     c.res.on('close', () => app.handoff.off('ticket', listener));
-  }, true);
+  });
 
   // --- dispatcher ---------------------------------------------------------------
+  const clientIp = (req: IncomingMessage) => {
+    const fwd = opts.trustProxy ? String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim() : '';
+    return fwd || req.socket.remoteAddress || 'desconhecido';
+  };
+
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const started = performance.now();
+    res.locals = { hsts: opts.hsts };
     try {
       const match = routes.map((r) => ({ r, m: r.method === req.method ? r.re.exec(url.pathname) : null })).find((x) => x.m);
       if (!match) throw new HttpError(routes.some((r) => r.re.test(url.pathname)) ? 405 : 404, 'rota não encontrada');
-      if (match.r.admin) checkAdmin(req);
       const raw = req.method === 'GET' ? Buffer.alloc(0) : await readBody(req, opts.maxBodyBytes ?? 1_000_000);
       const ctx: Ctx = {
-        req, res, url, raw, params: { ...match.m!.groups },
+        req, res, url, raw, ip: clientIp(req), params: { ...match.m!.groups },
         json() {
           try {
             return JSON.parse(raw.toString('utf8') || '{}');
@@ -269,13 +487,14 @@ export function createHttpServer(app: BotApp, opts: ServerOptions): Server {
           }
         },
       };
+      if (match.r.admin) checkAdmin(ctx);
       const out = await match.r.handler(ctx);
       if (!res.headersSent && out !== undefined) send(res, 200, out);
       else if (!res.headersSent) send(res, 204, '');
     } catch (e) {
       const status = e instanceof HttpError ? e.status : 500;
       if (status >= 500) app.logger.error('http_error', { path: url.pathname, error: String(e) });
-      send(res, status, { error: status >= 500 ? 'erro interno' : (e as Error).message });
+      send(res, status, { error: status >= 500 ? 'erro interno' : (e as Error).message }, undefined, e instanceof HttpError ? e.headers : {});
     } finally {
       app.metrics.observe('http.ms', performance.now() - started);
     }

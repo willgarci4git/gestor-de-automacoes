@@ -15,3 +15,9 @@ services:
         value: /app/data/bot.db
       - key: INTEGRATION_ALLOWED_HOSTS
         value: script.google.com,script.googleusercontent.com
+      - key: TRUST_PROXY          # Render fica atrás de proxy: IP real vem de X-Forwarded-For
+        value: "1"
+      - key: WEBCHAT_SECRET
+        generateValue: true
+      - key: DATA_ENCRYPTION_KEY  # disco do plano free é efêmero; a chave protege volumes persistentes
+        generateValue: true

@@ -291,3 +291,17 @@ Os logs são JSON por linha, com `conversationId`, `flow@version`, `nodeId` e `e
   2. Crie um parser `payload → InboundEvent[]`.
   3. Adicione a rota de webhook.
 - **Escala horizontal:** implemente `Storage` sobre Postgres. As queries do `SqliteStorage` são SQL padrão, e o controle de concorrência já usa `rev` otimista. Com várias instâncias, use também uma fila particionada por `conversationId` (por exemplo, Redis Streams ou SQS FIFO com `MessageGroupId`) em vez do `KeyedMutex`, que só serializa dentro de um processo.
+
+## Segurança (v0.4.1)
+
+Revisão STRIDE × CIAND com 16 ameaças tratadas (detalhes em `docs/ADR-003-seguranca.md`). Para produção:
+
+| Variável | Para quê |
+|---|---|
+| `ADMIN_TOKEN` ou `ADMIN_TOKENS=nome:token,…` | Obrigatório, 32+ caracteres. Sem ele o servidor não sobe. Um token por operador identifica quem fez cada ação na auditoria. |
+| `INTEGRATION_ALLOWED_HOSTS` | Hosts que as integrações dos fluxos podem chamar (ex.: `script.google.com,script.googleusercontent.com`). Vazio em produção = nenhuma integração sai. |
+| `WEBCHAT_SECRET`, `WEBCHAT_TENANTS` | Assinatura das sessões do widget e tenants aceitos no webchat. |
+| `DATA_ENCRYPTION_KEY` | Cifra conversas e contatos no banco (AES-256-GCM). |
+| `TRUST_PROXY=1` | Atrás de proxy (Render): limites de taxa pelo IP real. |
+
+Desenvolvimento local sem token: `ALLOW_INSECURE_DEV=1 npm run dev` (escuta só em 127.0.0.1). Testes de segurança: `test/security*.test.ts`.
